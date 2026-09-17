@@ -11,6 +11,7 @@ def _resultado_fake(numero="2001"):
     return ResultadoMargem(
         numero_pedido=numero,
         canal="meli_conta_1",
+        data_pedido="17/09/2026",
         receita=100.0,
         cmv=40.0,
         imposto=4.0,

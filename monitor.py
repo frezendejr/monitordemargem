@@ -23,6 +23,7 @@ import yaml
 from dotenv import load_dotenv
 
 import storage
+import supabase_writer
 from alerts import atualizar_planilha, enviar_email, enviar_whatsapp, montar_mensagem_alerta
 from custo_planilha import carregar_custos
 from margin_engine import calcular_margem
@@ -160,6 +161,7 @@ def processar_ciclo_conta(
             itens=itens,
             receita=receita,
             canal_config=canal_config_efetivo,
+            data_pedido=pedido_completo.get("data_pedido", ""),
         )
 
         threshold = config.get("alertas", {}).get("margem_negativa_threshold", 0)
@@ -173,6 +175,15 @@ def processar_ciclo_conta(
 
         atualizar_planilha(resultado)
         storage.salvar_pedido(conn, conta_tiny, resultado, alertado=deve_alertar)
+
+        try:
+            supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar)
+            supabase_writer.enviar_itens(conta_tiny, resultado)
+        except (supabase_writer.SupabaseError, KeyError):
+            # So alimenta o dashboard - nunca pode travar o monitor. O
+            # SQLite local (fonte de verdade operacional) ja foi salvo acima.
+            logger.exception("[%s] Falha ao gravar pedido %s no Supabase (dashboard)", conta_tiny, id_tiny)
+
         processados += 1
 
     if houve_falha_de_api:

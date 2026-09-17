@@ -31,9 +31,28 @@ class ItemPedido:
 
 
 @dataclass
+class ItemMargem:
+    """Margem alocada de UM item do pedido - pra dashboards por produto.
+
+    O rateio de imposto/comissao/frete/ads entre os itens e proporcional ao
+    peso de cada item no valor total dos itens (quantidade x valor_unitario).
+    Isso garante que a soma dos ItemMargem de um pedido bate exatamente com
+    o ResultadoMargem do pedido inteiro - nao e um calculo independente."""
+
+    sku: str
+    quantidade: float
+    receita: float
+    cmv: float
+    margem_contribuicao: float
+    margem_pct: float
+    custo_ausente: bool
+
+
+@dataclass
 class ResultadoMargem:
     numero_pedido: str
     canal: str
+    data_pedido: str
     receita: float
     cmv: float
     imposto: float
@@ -44,6 +63,7 @@ class ResultadoMargem:
     margem_pct: float
     custo_ausente: bool
     skus_sem_custo: list[str] = field(default_factory=list)
+    itens: list[ItemMargem] = field(default_factory=list)
 
 
 def _percentual_frete(receita: float, canal_config: dict) -> float:
@@ -68,6 +88,7 @@ def calcular_margem(
     itens: list[ItemPedido],
     receita: float,
     canal_config: dict,
+    data_pedido: str = "",
 ) -> ResultadoMargem:
     """Calcula a margem de contribuicao de um pedido.
 
@@ -97,9 +118,12 @@ def calcular_margem(
     margem_contribuicao = receita - cmv - imposto - comissao - frete - ads
     margem_pct = (margem_contribuicao / receita * 100) if receita else 0.0
 
+    itens_margem = _ratear_por_item(itens, receita, cmv, imposto + comissao + frete + ads)
+
     return ResultadoMargem(
         numero_pedido=numero_pedido,
         canal=canal,
+        data_pedido=data_pedido,
         receita=round(receita, 2),
         cmv=round(cmv, 2),
         imposto=round(imposto, 2),
@@ -110,4 +134,39 @@ def calcular_margem(
         margem_pct=round(margem_pct, 2),
         custo_ausente=custo_ausente,
         skus_sem_custo=skus_sem_custo,
+        itens=itens_margem,
     )
+
+
+def _ratear_por_item(
+    itens: list[ItemPedido], receita: float, cmv: float, custos_pedido: float
+) -> list[ItemMargem]:
+    """Rateia receita e os custos do pedido (imposto+comissao+frete+ads,
+    somados) entre os itens, proporcional ao peso de cada item no valor
+    total listado (quantidade x valor_unitario). CMV nao e rateado - e
+    calculado direto por item, ja que cada item tem seu proprio custo."""
+    valor_total_itens = sum(item.quantidade * item.valor_unitario for item in itens)
+
+    resultado = []
+    for item in itens:
+        valor_item = item.quantidade * item.valor_unitario
+        peso = (valor_item / valor_total_itens) if valor_total_itens else (1 / len(itens) if itens else 0)
+
+        receita_item = receita * peso
+        cmv_item = item.quantidade * (item.custo_unitario or 0.0)
+        custos_rateados_item = custos_pedido * peso
+        margem_item = receita_item - cmv_item - custos_rateados_item
+        margem_pct_item = (margem_item / receita_item * 100) if receita_item else 0.0
+
+        resultado.append(
+            ItemMargem(
+                sku=item.sku,
+                quantidade=item.quantidade,
+                receita=round(receita_item, 2),
+                cmv=round(cmv_item, 2),
+                margem_contribuicao=round(margem_item, 2),
+                margem_pct=round(margem_pct_item, 2),
+                custo_ausente=item.custo_unitario is None,
+            )
+        )
+    return resultado

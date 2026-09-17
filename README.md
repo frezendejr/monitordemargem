@@ -40,11 +40,74 @@ quando algo sai muito no vermelho, nao para reconciliar centavo a centavo.
 Calibrado e rodado de ponta a ponta contra as 4 contas Tiny reais (3 vezes,
 com bugs reais corrigidos no processo - ver "Avisos de campos ajustados").
 As 4 contas de Mercado Livre estao autorizadas via OAuth e usam receita
-liquida EXATA (nao estimada) via `ml_client.py`. **Falta**: preencher os
-percentuais reais de Amazon e TikTok Shop (nao estavam no escopo original),
-configurar WhatsApp/e-mail de verdade, e uma rodada de validacao final agora
+liquida EXATA (nao estimada) via `ml_client.py`. WhatsApp via CallMeBot
+configurado e testado. Dashboard (Streamlit + Supabase) construido, falta
+rodar o SQL no Supabase e publicar. **Falta**: preencher os percentuais
+reais de Amazon e TikTok Shop (nao estavam no escopo original), e uma rodada
+de validacao final agora
 que os bugs de custo foram corrigidos (a ultima rodada completa ainda tinha
 o bug do cache de custo).
+
+## Dashboard (margem venda a venda, por marketplace/conta/produto)
+
+`dashboard.py` (Streamlit) mostra indicadores de margem filtrando por conta
+Tiny, canal (marketplace/subconta), com tabela venda a venda e ranking de
+produtos por margem (melhores/piores SKUs). Le do **Supabase**, nao do
+SQLite local - o SQLite (`margem_monitor.db`) continua sendo so o controle
+operacional de dedupe/checkpoint do `monitor.py`.
+
+### 1. Rodar o SQL no Supabase (uma vez)
+
+Colar [`supabase_schema.sql`](supabase_schema.sql) no SQL Editor do projeto
+`rohkbgywmskllgxufmyp` (o mesmo do AmoApp) - cria `margin_monitor_pedidos` e
+`margin_monitor_itens`, com RLS permissiva pra leitura (a escrita real e
+sempre via service role, que ignora RLS).
+
+### 2. Preencher `.env` com as credenciais do Supabase
+
+```
+SUPABASE_URL=https://rohkbgywmskllgxufmyp.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...   # monitor.py escreve com essa
+SUPABASE_ANON_KEY=...           # dashboard.py so le com essa
+```
+
+Essas 3 chaves ja existem no `.env.local` do projeto AmoApp (pasta
+`Claude Code`) - copiar de la, nao gerar credencial nova.
+
+### 3. `monitor.py` passa a gravar no Supabase automaticamente
+
+Cada pedido processado grava no SQLite local (como sempre) **e** no
+Supabase (`supabase_writer.py`) - o pedido inteiro em
+`margin_monitor_pedidos` e o rateio por item (SKU) em
+`margin_monitor_itens`. Se a gravacao no Supabase falhar (rede, credencial
+faltando), so loga e segue - nunca derruba o monitor, ja que o SQLite local
+e a fonte de verdade operacional.
+
+**Importante**: como o rateio por item so existe a partir dessa versao,
+pedidos processados ANTES dela nao tem linha em `margin_monitor_itens` -
+o dashboard "por produto" so cobre pedidos novos.
+
+### 4. Rodar o dashboard local
+
+```bash
+streamlit run dashboard.py
+```
+
+### 5. Publicar (Streamlit Community Cloud, gratuito)
+
+1. Acesse [share.streamlit.io](https://share.streamlit.io), logue com a
+   conta GitHub que tem acesso ao repo `monitordemargem`.
+2. "New app" -> escolher o repo, branch `master`, arquivo `dashboard.py`.
+3. Em "Advanced settings" -> "Secrets", colar (formato TOML, nao `.env`):
+   ```toml
+   SUPABASE_URL = "https://rohkbgywmskllgxufmyp.supabase.co"
+   SUPABASE_ANON_KEY = "..."
+   ```
+   **Nunca colar a `SUPABASE_SERVICE_ROLE_KEY` aqui** - o dashboard so
+   precisa ler, e a service role da acesso de escrita irrestrito.
+4. Deploy. O link gerado (`*.streamlit.app`) pode ser compartilhado com o
+   time - o repo pode continuar privado, o Streamlit Cloud so precisa de
+   acesso de leitura a ele (via OAuth do GitHub).
 
 ## Custo dos produtos (planilha de apoio)
 
@@ -128,9 +191,16 @@ motivo (pedido antigo, token expirado, rate limit) - ver
   `{sku: custo}`. `gerar_custos_por_codigo_pai.py` - gera essa planilha a
   partir de 2 exports (Tiny + Mercado Livre). Ver secao "Custo dos
   produtos".
-- `margin_engine.py` - calculo da margem por pedido. Testado, so deveria
-  mudar se a formula mudar.
-- `storage.py` - SQLite para dedupe e checkpoint de "ultima busca".
+- `margin_engine.py` - calculo da margem por pedido, incluindo o rateio por
+  item (`ItemMargem`) usado pelo dashboard "por produto". Testado, so
+  deveria mudar se a formula mudar.
+- `storage.py` - SQLite para dedupe e checkpoint de "ultima busca" (controle
+  operacional, nao alimenta o dashboard).
+- `supabase_writer.py` - grava cada pedido/item calculado no Supabase, so
+  pra alimentar o `dashboard.py`. `supabase_schema.sql` - SQL das tabelas
+  (colar no SQL Editor do Supabase, ver secao "Dashboard").
+- `dashboard.py` - dashboard Streamlit (margem por marketplace/conta/
+  produto/venda), le do Supabase. Ver secao "Dashboard".
 - `alerts.py` - WhatsApp (CallMeBot, Z-API ou Meta Cloud API), e-mail (SMTP)
   e atualizacao da planilha de historico (`dashboard_margem.xlsx` - nao
   confundir com a planilha de custo).
