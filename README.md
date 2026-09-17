@@ -1,11 +1,15 @@
 # Monitor de Margem de Contribuicao (ML + Shopee + Amazon + TikTok Shop)
 
 Monitor quase-tempo-real da margem de contribuicao das vendas do Grupo Amo /
-Amo Outlet, lendo os pedidos direto do Tiny ERP (que ja centraliza os canais e
-tem o custo de cada SKU cadastrado). Alerta a equipe por WhatsApp e e-mail
-sempre que um pedido sai com margem negativa, mantem um historico em
-`dashboard_margem.xlsx` e usa um SQLite (`margem_monitor.db`) para nao
-alertar o mesmo pedido duas vezes.
+Amo Outlet, lendo os pedidos direto do Tiny ERP (que ja centraliza os
+canais). Alerta a equipe por WhatsApp e e-mail sempre que um pedido sai com
+margem negativa, mantem um historico em `dashboard_margem.xlsx` e usa um
+SQLite (`margem_monitor.db`) para nao alertar o mesmo pedido duas vezes.
+
+**Custo do produto vem de uma planilha de apoio (`custo_por_codigo_pai.xlsx`),
+nao mais de consulta ao vivo no Tiny** - ver secao "Custo dos produtos"
+abaixo. Motivo: o custo cadastrado no Tiny estava zerado/ausente numa fatia
+grande do catalogo.
 
 **Multi-conta:** o Grupo Amo tem 4 contas Tiny distintas, uma por CNPJ, cada
 uma com seu proprio token de API. Varios canais de venda podem conviver
@@ -41,6 +45,39 @@ percentuais reais de Amazon e TikTok Shop (nao estavam no escopo original),
 configurar WhatsApp/e-mail de verdade, e uma rodada de validacao final agora
 que os bugs de custo foram corrigidos (a ultima rodada completa ainda tinha
 o bug do cache de custo).
+
+## Custo dos produtos (planilha de apoio)
+
+O Tiny (mesmo depois de corrigido o bug de parametro `id`/`codigo` - ver
+"Avisos de campos ajustados") continua tendo custo zerado/ausente numa fatia
+grande do catalogo (~24% dos codigos pai numa amostra real). Em vez de
+depender so dele, o custo usado no calculo de margem vem de uma **planilha
+de apoio mantida por fora**, `custo_por_codigo_pai.xlsx`, uma linha por
+"codigo pai" (agrupa as variacoes de tamanho/cor de um mesmo modelo) com o
+custo consolidado.
+
+**Gerar/atualizar a planilha** a partir de 2 exports (`gerar_custos_por_codigo_pai.py`):
+1. Export do cadastro do Tiny com a aba `BaseDados` (traz `Codigo (SKU)`,
+   `Preco de custo` e `Codigo do pai`).
+2. Export de publicacoes do Mercado Livre (traz `SKU` e `Custo do produto
+   carregado`, o custo cadastrado direto no ML).
+
+```bash
+python gerar_custos_por_codigo_pai.py --base-dados "<export do Tiny>.xlsx" --custo-ml "<export do ML>.xlsx"
+```
+
+O script agrupa por codigo pai e usa qualquer custo nao-zero encontrado em
+qualquer SKU do grupo (Tiny ou ML), sinalizando na planilha de saida:
+- **linha com custo em branco** - nenhuma das 2 fontes tinha custo pra
+  nenhum SKU daquele grupo. Precisa preencher a mao.
+- **coluna `conflito` = SIM** - SKUs do mesmo grupo tem custos diferentes
+  cadastrados entre si (pode ser erro de cadastro ou custo que mudou).
+
+Depois de corrigir a mao os que faltam, o `monitor.py` le
+`custo_por_codigo_pai.xlsx` (`custo_planilha.py`) **a cada ciclo** (nao so
+na inicializacao), entao uma correcao na planilha vale a partir do proximo
+ciclo, sem precisar reiniciar o processo. Um SKU que nao aparece na planilha
+vira `custo_ausente` no pedido, do mesmo jeito que antes.
 
 ## Integracao com Mercado Livre (receita exata)
 
@@ -81,14 +118,22 @@ motivo (pedido antigo, token expirado, rate limit) - ver
 ## Arquivos
 
 - `monitor.py` - loop principal (`--once` roda uma vez, sem argumento roda em
-  loop continuo).
-- `tiny_client.py` - cliente da API do Tiny (pedidos + custo de produto).
-  **Arquivo com mais suposicoes a confirmar**, ver secao abaixo.
+  loop continuo). `--custo-planilha` sobrescreve o caminho da planilha de
+  custo (padrao `custo_por_codigo_pai.xlsx`).
+- `tiny_client.py` - cliente da API do Tiny (pedidos + identificacao de
+  canal). `obter_produto`/`obter_custo_produto`/`--debug-produto` ainda
+  existem pra depuracao manual, mas o `monitor.py` nao usa mais isso pra
+  calcular margem - custo vem da planilha (ver abaixo).
+- `custo_planilha.py` - le `custo_por_codigo_pai.xlsx` e devolve
+  `{sku: custo}`. `gerar_custos_por_codigo_pai.py` - gera essa planilha a
+  partir de 2 exports (Tiny + Mercado Livre). Ver secao "Custo dos
+  produtos".
 - `margin_engine.py` - calculo da margem por pedido. Testado, so deveria
   mudar se a formula mudar.
 - `storage.py` - SQLite para dedupe e checkpoint de "ultima busca".
-- `alerts.py` - WhatsApp (Z-API ou Meta Cloud API), e-mail (SMTP) e
-  atualizacao da planilha.
+- `alerts.py` - WhatsApp (CallMeBot, Z-API ou Meta Cloud API), e-mail (SMTP)
+  e atualizacao da planilha de historico (`dashboard_margem.xlsx` - nao
+  confundir com a planilha de custo).
 - `ml_client.py` - cliente OAuth2 do Mercado Livre + Mercado Pago, usado
   pelos canais Meli pra pegar a receita liquida EXATA do pedido (ver secao
   "Integracao com Mercado Livre" abaixo). `ml_tokens_meli_conta_N.json`
@@ -221,18 +266,20 @@ em relacao ao que o codigo assumia originalmente:
   informado") pra TODO produto. Esse bug fazia ~70% dos pedidos de uma
   rodada real aparecerem como `custo_ausente=true` quando na verdade tinham
   custo cadastrado normalmente (ex.: produto id=898908943 tinha
-  `preco_custo=73.49`, id=898221803 tinha `119.99`). Corrigido em
-  `TinyClient.obter_produto`/`obter_custo_produto` - agora recebem
-  `id_produto`, nao `codigo`. `ItemPedido.sku` continua mostrando o
-  `codigo` pra exibicao, so a busca de custo mudou de campo.
-- **Cache de custo "envenenado" por erro temporario de API**: antes,
-  `obter_custo_produto` engolia `TinyApiError` (rate limit, timeout) e
+  `preco_custo=73.49`, id=898221803 tinha `119.99`). `TinyClient.obter_produto`
+  ainda usa `id` corretamente (util pra `--debug-produto`), mas depois disso
+  o projeto mudou de arquitetura: custo passou a vir de uma **planilha de
+  apoio** (`custo_planilha.py`) em vez de consulta ao vivo no Tiny - ver
+  secao "Custo dos produtos". `montar_itens` voltou a buscar por `codigo`
+  (SKU), que e a chave natural da planilha.
+- **Cache de custo "envenenado" por erro temporario de API** (bug historico,
+  ja nao existe mais): quando o custo ainda vinha de consulta ao vivo no
+  Tiny, `obter_custo_produto` engolia `TinyApiError` (rate limit, timeout) e
   devolvia `None`, que era cacheado como se o produto realmente nao tivesse
   custo - todo pedido seguinte que usasse o MESMO produto na mesma rodada
-  ficava com `custo_ausente` incorreto pelo resto da execucao, mesmo o
-  produto tendo custo real. Corrigido: `obter_custo_produto` agora propaga
-  o erro, e `monitor.py` so cacheia o resultado quando a busca teve sucesso
-  (ver `_TinyClientCustoFake` em `tests/test_monitor.py`).
+  ficava com `custo_ausente` incorreto pelo resto da execucao. Ficou moot
+  depois que o custo passou a vir da planilha de apoio (sem cache, sem
+  chamada de API por pedido) - mantido aqui so como registro historico.
 - **Checkpoint avancava mesmo com falha de API no meio do ciclo**: se um
   pedido falhasse ao buscar detalhe (rate limit, timeout), o checkpoint
   ainda avancava pro "agora" no fim do ciclo - o filtro `dataAtualizacao`

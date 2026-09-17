@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 
 import storage
 from alerts import atualizar_planilha, enviar_email, enviar_whatsapp, montar_mensagem_alerta
+from custo_planilha import carregar_custos
 from margin_engine import calcular_margem
 from ml_client import MLClient, MLApiError
 from tiny_client import TinyClient, TinyApiError
@@ -39,6 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger("monitor")
 
 CONFIG_PATH_PADRAO = "config.yaml"
+CUSTO_PLANILHA_PADRAO = "custo_por_codigo_pai.xlsx"
 JANELA_INICIAL = timedelta(hours=24)
 
 
@@ -90,6 +92,7 @@ def processar_ciclo_conta(
     canais_config: dict,
     config: dict,
     conn,
+    custos: dict[str, float],
 ) -> int:
     """Roda um ciclo para UMA conta Tiny: busca pedidos novos, calcula
     margem, alerta se preciso. Retorna a quantidade de pedidos processados.
@@ -117,7 +120,6 @@ def processar_ciclo_conta(
         desde.isoformat(),
     )
 
-    custo_cache: dict[str, float | None] = {}
     processados = 0
     houve_falha_de_api = False
 
@@ -147,26 +149,7 @@ def processar_ciclo_conta(
             logger.warning("[%s] Pedido %s sem canal identificado - pulando", conta_tiny, id_tiny)
             continue
 
-        for wrapper in pedido_completo.get("itens", []):
-            item = wrapper.get("item", wrapper)
-            # produto.obter.php exige o id_produto interno do Tiny, nao o
-            # codigo/SKU (ver tiny_client.py) - custo_cache e chaveado por ele.
-            id_produto = str(item.get("id_produto"))
-            if id_produto not in custo_cache:
-                try:
-                    custo_cache[id_produto] = cliente.obter_custo_produto(id_produto)
-                except TinyApiError:
-                    # Nao cacheia: um erro de API (rate limit, timeout) nao
-                    # pode virar "custo ausente" permanente pro resto da
-                    # rodada - deixa faltar so nesse item, e tenta de novo
-                    # na proxima vez que esse produto aparecer.
-                    logger.warning(
-                        "[%s] Falha ao buscar custo do produto id=%s - tratando so este item como custo ausente",
-                        conta_tiny,
-                        id_produto,
-                    )
-
-        itens = cliente.montar_itens(pedido_completo, custo_cache)
+        itens = cliente.montar_itens(pedido_completo, custos)
         receita, canal_config_efetivo = _resolver_receita_e_config(
             pedido_completo, canal, canais_config[canal], ml_clientes
         )
@@ -204,8 +187,15 @@ def processar_ciclo_conta(
     return processados
 
 
-def processar_ciclo(config: dict, conn) -> int:
-    """Roda um ciclo em todas as contas Tiny cadastradas em config.yaml."""
+def processar_ciclo(config: dict, conn, custo_planilha: str) -> int:
+    """Roda um ciclo em todas as contas Tiny cadastradas em config.yaml.
+
+    Recarrega a planilha de custo a cada ciclo (nao so uma vez no inicio),
+    pra uma correcao manual feita nela valer a partir do proximo ciclo, sem
+    precisar reiniciar o processo continuo.
+    """
+    custos = carregar_custos(custo_planilha)
+    logger.info("Planilha de custo '%s' carregada: %d SKU(s) com custo", custo_planilha, len(custos))
     total = 0
     for conta_tiny, conta_cfg in config["tiny_contas"].items():
         token_env = conta_cfg["token_env"]
@@ -215,7 +205,7 @@ def processar_ciclo(config: dict, conn) -> int:
             continue
 
         cliente = TinyClient(token)
-        total += processar_ciclo_conta(conta_tiny, cliente, conta_cfg["canais"], config, conn)
+        total += processar_ciclo_conta(conta_tiny, cliente, conta_cfg["canais"], config, conn, custos)
 
     return total
 
@@ -225,13 +215,18 @@ def main():
 
     parser = argparse.ArgumentParser(description="Monitor de margem de contribuicao")
     parser.add_argument("--once", action="store_true", help="Roda um ciclo em todas as contas e sai")
+    parser.add_argument(
+        "--custo-planilha",
+        default=CUSTO_PLANILHA_PADRAO,
+        help=f"Caminho da planilha de custo por SKU (padrao: {CUSTO_PLANILHA_PADRAO})",
+    )
     args = parser.parse_args()
 
     config = carregar_config()
 
     with storage.sessao() as conn:
         if args.once:
-            n = processar_ciclo(config, conn)
+            n = processar_ciclo(config, conn, args.custo_planilha)
             logger.info("Ciclo unico concluido: %d pedido(s) processado(s) no total", n)
             return
 
@@ -239,7 +234,7 @@ def main():
         logger.info("Iniciando loop continuo (intervalo de %d min)", intervalo)
         while True:
             try:
-                n = processar_ciclo(config, conn)
+                n = processar_ciclo(config, conn, args.custo_planilha)
                 logger.info("Ciclo concluido: %d pedido(s) processado(s) no total", n)
             except Exception:
                 logger.exception("Erro inesperado no ciclo - continuando no proximo")

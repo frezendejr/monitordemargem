@@ -54,10 +54,9 @@ def test_pedido_sem_bloco_ecommerce_retorna_none():
     assert cliente.identificar_canal({"numero": "1"}, CANAIS_AMOSHOES) is None
 
 
-def test_montar_itens_usa_id_produto_para_cache_de_custo_nao_codigo():
-    # Bug real encontrado calibrando: produto.obter.php exige o id_produto
-    # interno (nao o codigo/SKU) - custo_por_id_produto tem que ser buscado
-    # por id_produto, senao custo_unitario vem sempre None.
+def test_montar_itens_busca_custo_pela_planilha_por_codigo():
+    # Custo agora vem da planilha de apoio (custo_planilha.py), chaveada por
+    # codigo/SKU - nao mais de consulta ao vivo no Tiny por id_produto.
     pedido_completo = {
         "itens": [
             {
@@ -70,9 +69,21 @@ def test_montar_itens_usa_id_produto_para_cache_de_custo_nao_codigo():
             }
         ]
     }
-    custo_por_id_produto = {"898908943": 73.49}
+    custos_da_planilha = {"912837": 73.49}
 
-    itens = TinyClient.montar_itens(pedido_completo, custo_por_id_produto)
+    itens = TinyClient.montar_itens(pedido_completo, custos_da_planilha)
 
-    assert itens[0].sku == "912837"  # exibicao continua pelo codigo
-    assert itens[0].custo_unitario == 73.49  # busca foi por id_produto
+    assert itens[0].sku == "912837"
+    assert itens[0].custo_unitario == 73.49
+
+
+def test_montar_itens_sku_fora_da_planilha_fica_sem_custo():
+    pedido_completo = {
+        "itens": [
+            {"item": {"codigo": "999999", "id_produto": "1", "quantidade": "1.00", "valor_unitario": "50.00"}}
+        ]
+    }
+
+    itens = TinyClient.montar_itens(pedido_completo, {})
+
+    assert itens[0].custo_unitario is None

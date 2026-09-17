@@ -89,80 +89,60 @@ class _TinyClientFake:
     def obter_pedido_completo(self, id_tiny):
         if id_tiny == "1002" and self._falha_no_segundo:
             raise TinyApiError("API Bloqueada - rate limit simulado")
-        return {"total_pedido": "100.00", "numero_ecommerce": "X", "itens": []}
-
-    def identificar_canal(self, pedido, canais_config):
-        return "shopee_1"
-
-    def montar_itens(self, pedido, custo_cache):
-        return [ItemPedido(sku="ABC", quantidade=1, valor_unitario=100.0, custo_unitario=40.0)]
-
-    def obter_custo_produto(self, sku):
-        return 40.0
-
-
-class _TinyClientCustoFake:
-    """2 pedidos que usam o MESMO id_produto. A primeira busca de custo
-    desse produto falha (rate limit simulado); a segunda tem sucesso."""
-
-    def __init__(self):
-        self._chamadas_custo = 0
-
-    def buscar_pedidos_atualizados_desde(self, desde):
-        return [{"id": "2001"}, {"id": "2002"}]
-
-    def obter_pedido_completo(self, id_tiny):
         return {
             "total_pedido": "100.00",
             "numero_ecommerce": "X",
-            "itens": [{"item": {"codigo": "SKU1", "id_produto": "PROD1", "quantidade": "1.00", "valor_unitario": "100.00"}}],
+            "itens": [{"item": {"codigo": "ABC", "id_produto": "1", "quantidade": "1.00", "valor_unitario": "100.00"}}],
         }
 
     def identificar_canal(self, pedido, canais_config):
         return "shopee_1"
 
-    def obter_custo_produto(self, id_produto):
-        self._chamadas_custo += 1
-        if self._chamadas_custo == 1:
-            raise TinyApiError("API Bloqueada - rate limit simulado")
-        return 40.0
-
-    def montar_itens(self, pedido, custo_cache):
+    def montar_itens(self, pedido, custos):
         item = pedido["itens"][0]["item"]
         return [
             ItemPedido(
                 sku=item["codigo"],
                 quantidade=1,
                 valor_unitario=100.0,
-                custo_unitario=custo_cache.get(item["id_produto"]),
+                custo_unitario=custos.get(item["codigo"]),
             )
         ]
 
 
-def test_falha_de_api_no_custo_nao_envenena_o_cache_pro_resto_da_rodada(tmp_path):
+def test_custo_vem_da_planilha_nao_do_tiny(tmp_path):
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
-        cliente = _TinyClientCustoFake()
-        monitor.processar_ciclo_conta("conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn)
+        cliente = _TinyClientFake(falha_no_segundo=False)
+        custos = {"ABC": 40.0}
+        monitor.processar_ciclo_conta(
+            "conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn, custos
+        )
 
-        db_path = tmp_path / "teste.db"
-        import sqlite3
-
-        c = sqlite3.connect(str(db_path))
-        pedido_2001 = c.execute(
-            "SELECT custo_ausente FROM pedidos_processados WHERE numero_pedido='2001'"
+        resultado = conn.execute(
+            "SELECT custo_ausente FROM pedidos_processados WHERE numero_pedido='1001'"
         ).fetchone()
-        pedido_2002 = c.execute(
-            "SELECT custo_ausente FROM pedidos_processados WHERE numero_pedido='2002'"
-        ).fetchone()
+        assert resultado[0] == 0  # achou o custo na planilha
 
-        assert pedido_2001[0] == 1  # primeira tentativa falhou (rate limit simulado)
-        assert pedido_2002[0] == 0  # segunda tentativa do MESMO produto teve sucesso
+
+def test_sku_fora_da_planilha_vira_custo_ausente(tmp_path):
+    with storage.sessao(str(tmp_path / "teste.db")) as conn:
+        cliente = _TinyClientFake(falha_no_segundo=False)
+        monitor.processar_ciclo_conta(
+            "conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn, custos={}
+        )
+
+        resultado = conn.execute(
+            "SELECT custo_ausente FROM pedidos_processados WHERE numero_pedido='1001'"
+        ).fetchone()
+        assert resultado[0] == 1  # SKU "ABC" nao esta na planilha de custo
 
 
 def test_checkpoint_avanca_quando_ciclo_completa_sem_falha(tmp_path):
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
         cliente = _TinyClientFake(falha_no_segundo=False)
-        monitor.processar_ciclo_conta("conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn)
+        monitor.processar_ciclo_conta(
+            "conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn, custos={}
+        )
 
         assert storage.obter_checkpoint(conn, "conta_x") is not None
 
@@ -170,7 +150,9 @@ def test_checkpoint_avanca_quando_ciclo_completa_sem_falha(tmp_path):
 def test_checkpoint_nao_avanca_quando_algum_pedido_falha(tmp_path):
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
         cliente = _TinyClientFake(falha_no_segundo=True)
-        monitor.processar_ciclo_conta("conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn)
+        monitor.processar_ciclo_conta(
+            "conta_x", cliente, {"shopee_1": CANAL_SEM_ML}, CONFIG_SEM_ALERTA, conn, custos={}
+        )
 
         # pedido 1001 foi processado (nao se perde o que deu certo)...
         assert storage.ja_processado(conn, "conta_x", "1001") is True

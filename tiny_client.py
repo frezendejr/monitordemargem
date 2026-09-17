@@ -147,23 +147,21 @@ class TinyClient:
         return None
 
     @staticmethod
-    def montar_itens(pedido_completo: dict, custo_por_id_produto: dict[str, float | None]) -> list[ItemPedido]:
-        """`custo_por_id_produto` e chaveado por `id_produto` (o id interno
-        do Tiny), nao por `codigo` (SKU) - e o que produto.obter.php aceita
-        (ver obter_produto). `sku` no ItemPedido continua sendo o codigo,
-        so pra exibicao (ex.: relatorio de custo_ausente)."""
+    def montar_itens(pedido_completo: dict, custo_por_sku: dict[str, float | None]) -> list[ItemPedido]:
+        """`custo_por_sku` e chaveado por `codigo` (SKU) - vem da planilha de
+        apoio (custo_planilha.py), nao mais de consulta ao vivo no Tiny (ver
+        README: o custo cadastrado no Tiny estava zerado/ausente demais)."""
         itens_raw = pedido_completo.get("itens", [])
         itens = []
         for wrapper in itens_raw:
             item = wrapper.get("item", wrapper)
-            sku = item.get("codigo") or item.get("id_produto")
-            id_produto = str(item.get("id_produto"))
+            sku = str(item.get("codigo") or item.get("id_produto"))
             itens.append(
                 ItemPedido(
-                    sku=str(sku),
+                    sku=sku,
                     quantidade=float(item.get("quantidade", 0)),
                     valor_unitario=float(item.get("valor_unitario", 0)),
-                    custo_unitario=custo_por_id_produto.get(id_produto),
+                    custo_unitario=custo_por_sku.get(sku),
                 )
             )
         return itens
