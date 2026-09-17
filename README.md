@@ -1,0 +1,259 @@
+# Monitor de Margem de Contribuicao (ML + Shopee + Amazon + TikTok Shop)
+
+Monitor quase-tempo-real da margem de contribuicao das vendas do Grupo Amo /
+Amo Outlet, lendo os pedidos direto do Tiny ERP (que ja centraliza os canais e
+tem o custo de cada SKU cadastrado). Alerta a equipe por WhatsApp e e-mail
+sempre que um pedido sai com margem negativa, mantem um historico em
+`dashboard_margem.xlsx` e usa um SQLite (`margem_monitor.db`) para nao
+alertar o mesmo pedido duas vezes.
+
+**Multi-conta:** o Grupo Amo tem 4 contas Tiny distintas, uma por CNPJ, cada
+uma com seu proprio token de API. Varios canais de venda podem conviver
+dentro da MESMA conta Tiny (ex.: a conta `amoshoes` sozinha reune Meli Conta
+2, Meli Conta 3, Shopee 1 e TikTok Shop). O monitor roda um ciclo em cada
+conta a cada iteracao - ver `tiny_contas` em `config.yaml`.
+
+| Conta Tiny (chave)         | CNPJ / apelido           | Canais dentro dela                          |
+|-----------------------------|--------------------------|----------------------------------------------|
+| `conta_amoshoesgyn`         | amoshoesgyn              | Meli Conta 1                                  |
+| `conta_amoshoes`             | amoshoes                 | Meli Conta 2, Meli Conta 3, Shopee 1, TikTok Shop |
+| `conta_inamorato`            | inamorato                | Meli Conta 4, Amazon                          |
+| `conta_28849110000141`       | CNPJ 28.849.110/0001-41  | Shopee 2                                      |
+
+Formula: `MC = Receita - CMV - Imposto - Comissao/tarifa do canal - Frete -
+% de ads estimado`.
+
+**Importante: Imposto, Comissao, Frete e Ads sao sempre estimativas em % (do
+`config.yaml`), nunca os valores exatos do pedido.** Confirmado contra um
+pedido real (ver "Avisos de campos ajustados" no fim deste arquivo): o Tiny
+nao expoe a tarifa de venda real, o frete real cobrado do vendedor nem
+estornos de cupom/bonus - esses numeros so existem no extrato de cada
+marketplace, que este projeto nao integra. O monitor e para alertar rapido
+quando algo sai muito no vermelho, nao para reconciliar centavo a centavo.
+
+## Status
+
+Calibrado e rodado de ponta a ponta contra as 4 contas Tiny reais (3 vezes,
+com bugs reais corrigidos no processo - ver "Avisos de campos ajustados").
+As 4 contas de Mercado Livre estao autorizadas via OAuth e usam receita
+liquida EXATA (nao estimada) via `ml_client.py`. **Falta**: preencher os
+percentuais reais de Amazon e TikTok Shop (nao estavam no escopo original),
+configurar WhatsApp/e-mail de verdade, e uma rodada de validacao final agora
+que os bugs de custo foram corrigidos (a ultima rodada completa ainda tinha
+o bug do cache de custo).
+
+## Integracao com Mercado Livre (receita exata)
+
+Pra pedidos de Mercado Livre, alem do Tiny, o monitor consulta a API do
+proprio ML + Mercado Pago (`ml_client.py`) pra pegar a receita liquida EXATA
+do pedido (`transaction_details.net_received_amount`) - ja descontando
+tarifa/frete real e considerando cupom reembolsado pelo ML, sem precisar
+estimar por `%`. Confirmado batendo 100% com o extrato real de um pedido
+(pedido 900314112: API disse R$115,45, extrato do ML mostrou R$115,45).
+
+Cada uma das 4 contas Meli tem sua **propria aplicacao OAuth** (Client
+ID/Client Secret proprios, nao compartilhados) e seu proprio arquivo de
+tokens (`ml_tokens_meli_conta_N.json`, gitignored). Fluxo de autorizacao,
+uma vez por conta (repetir quando o refresh_token expirar, ~6 meses depois):
+
+```bash
+python ml_client.py --conta meli_conta_1 --auth-url
+# abrir a URL, logar como ADMIN da conta Meli 1, autorizar
+# copiar o "code" da URL de retorno (repara: caiu em .../login?code=...
+# porque o middleware do AmoApp intercepta a rota /oauth/ml-callback que
+# nao existe - o code continua la, so muda o path)
+python ml_client.py --conta meli_conta_1 --exchange-code SEU_CODE
+```
+
+Repetir pra `meli_conta_2`, `meli_conta_3` e `meli_conta_4`.
+
+**Limitacao encontrada**: a API de pedidos do ML (`/orders/{id}`) so parece
+servir pedidos BEM recentes - pedidos de algumas horas atras ja devolvem 404
+"Order do not exists", enquanto pedidos de poucos minutos atras funcionam.
+Isso e esperado no uso real (o monitor roda perto do tempo real, entao os
+pedidos que ele processa sao sempre recentes), mas dificulta testar contra
+pedidos antigos na calibracao. Por isso o canal so usa a receita exata
+`receita_exata_via_ml: true` **com fallback automatico e seguro** pra
+`comissao_pct`/`frete_pct` estimados quando a API do ML falhar por qualquer
+motivo (pedido antigo, token expirado, rate limit) - ver
+`_resolver_receita_e_config` em `monitor.py`.
+
+## Arquivos
+
+- `monitor.py` - loop principal (`--once` roda uma vez, sem argumento roda em
+  loop continuo).
+- `tiny_client.py` - cliente da API do Tiny (pedidos + custo de produto).
+  **Arquivo com mais suposicoes a confirmar**, ver secao abaixo.
+- `margin_engine.py` - calculo da margem por pedido. Testado, so deveria
+  mudar se a formula mudar.
+- `storage.py` - SQLite para dedupe e checkpoint de "ultima busca".
+- `alerts.py` - WhatsApp (Z-API ou Meta Cloud API), e-mail (SMTP) e
+  atualizacao da planilha.
+- `ml_client.py` - cliente OAuth2 do Mercado Livre + Mercado Pago, usado
+  pelos canais Meli pra pegar a receita liquida EXATA do pedido (ver secao
+  "Integracao com Mercado Livre" abaixo). `ml_tokens_meli_conta_N.json`
+  guarda os tokens de cada conta (gitignored).
+- `config.example.yaml` / `config.yaml` - 4 contas Tiny (`tiny_contas`), cada
+  uma com seu `token_env` e a lista de canais dentro dela: imposto, % de ads,
+  comissao/frete (fixo ou por faixa de valor do pedido), e
+  `receita_exata_via_ml: true` nos canais Meli.
+- `.env.example` / `.env` - um `TINY_API_TOKEN_*` por conta Tiny, um
+  `ML_APP_ID_*`/`ML_CLIENT_SECRET_*` por conta Meli, + credenciais de
+  WhatsApp/e-mail. **Nunca commitar o `.env` real.**
+
+## Instalacao
+
+```bash
+cd margin-monitor
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+pip install -r requirements.txt
+copy .env.example .env          # depois preencher com credenciais reais
+```
+
+`config.yaml` ja existe (copia de `config.example.yaml`) - editar com os
+numeros reais do negocio antes de rodar contra o Tiny de verdade.
+
+## Rodando os testes
+
+```bash
+python -m pytest
+```
+
+## Calibrando contra o Tiny real (nesta ordem)
+
+1. ~~Confirmar a versao da API do Tiny.~~ **Feito**: e v2 classica (token
+   unico), como o codigo ja assumia.
+
+2. ~~Rodar os comandos de depuracao com um pedido real, um por conta Tiny.~~
+   **Feito** para as 4 contas, incluindo `tiny_identificador` de Meli Conta 3
+   (`"Mercado Livre 3"`) e Meli Conta 4 (`"Mercado Livre 4"`) - os palpites
+   originais no padrao `"ML_<NOME> <numero>"` estavam ERRADOS pra essas duas
+   (só a 1 e a 2 seguem esse padrao). `--debug-produto` tambem confirmado
+   (ver bug do parametro `id` x `codigo` nos avisos abaixo).
+
+3. ~~Confirmar o parametro de busca por atualizacao.~~ **Feito**:
+   `dataAtualizacao` em `pedidos.pesquisa.php` funciona e o resumo ja traz
+   `id` + `numero` juntos. Testado com:
+   ```bash
+   python tiny_client.py --conta conta_amoshoes --debug-busca 3
+   ```
+
+4. **Preencher os percentuais que ainda faltam em `config.yaml`**:
+   `imposto_pct`/`ads_pct`/`comissao_pct`/`frete_pct` da **Amazon** e do
+   **TikTok Shop** (nao estavam no escopo original, que so cobria ML+Shopee -
+   marcados `# PREENCHER`). As 4 contas Meli ja usam receita exata via ML,
+   entao `comissao_pct`/`frete_pct` delas so importam como fallback.
+
+5. ~~Preencher o `.env`~~. **Feito**: os 4 tokens do Tiny + os 4 pares
+   `ML_APP_ID_*`/`ML_CLIENT_SECRET_*` (um app OAuth por conta Meli) + as 4
+   autorizacoes OAuth completas. Falta Z-API/Meta (WhatsApp) e SMTP (e-mail)
+   quando for testar os alertas.
+
+6. ~~Rodar `python monitor.py --once`~~ **Feito 3x**, com 2 bugs reais
+   corrigidos no processo (ver avisos abaixo). A ultima rodada completa
+   ainda tinha o bug do cache de custo - rodar mais uma vez pra validar os
+   numeros finais antes de confiar neles pra valer.
+
+7. **Testar o alerta de margem negativa** de ponta a ponta contra um pedido
+   real conhecido (ex.: item abaixo de R$ 79 no ML).
+
+8. **Colocar para rodar continuamente** (cron chamando `monitor.py --once` a
+   cada poucos minutos, ou um servico com `monitor.py` sem argumento).
+
+## Coisas para NAO fazer
+
+- Nao reduzir `intervalo_minutos` para menos de alguns minutos sem checar o
+  limite de requisicoes da API do Tiny. **Confirmado na pratica**: uma
+  primeira rodada cobrindo 24h de historico bateu no rate limit do Tiny
+  ("API Bloqueada") numa das contas, e o bloqueio durou mais que "alguns
+  minutos" (persistiu por pelo menos ~15 min entre duas tentativas). Rodar
+  com o intervalo curto pretendido (poucos minutos, poucos pedidos novos por
+  vez) deve evitar isso - o problema so apareceu no backfill inicial grande.
+- Nao tratar `custo_ausente` como bug a esconder - e proposital: SKUs com
+  custo zero no Tiny sao sinalizados a parte em vez de deixar a margem
+  parecer boa por engano. O certo e corrigir o cadastro no Tiny, nao o
+  codigo. (Mas ver o bug do parametro `id`/`codigo` abaixo - confirmar que
+  um "custo_ausente" e real antes de assumir que e isso, pode ser bug.)
+- Nao commitar `.env` nem `ml_tokens_*.json` (tokens do Mercado Livre) nem
+  dados de pedidos reais de cliente.
+
+## Avisos de campos ajustados
+
+Calibrado em 2026-09-17 contra pedidos reais das 4 contas Tiny. O que mudou
+em relacao ao que o codigo assumia originalmente:
+
+- **Canal do pedido**: nao e um campo solto (`nome_ecommerce`/`ecommerce`)
+  no nivel raiz - e `pedido["ecommerce"]["nomeEcommerce"]`. Para Mercado
+  Livre esse valor ja vem com a subconta embutida (`"ML_AMOSHOESEIRELI 2"`,
+  `"ML_AMOOUTLET 1"`), entao **nao precisou** da logica de desempate
+  (`identificador_extra`) que a v1 do codigo tinha previsto - removida.
+- **Receita do pedido**: usa `pedido["total_pedido"]` direto, em vez de
+  recalcular a partir de item x quantidade + frete. Motivo: o TikTok Shop
+  aplica desconto de cupom que reduz o `total_pedido` (confirmado com um
+  pedido real, desconto de R$100) e recalcular na mao ignorava isso.
+- **Tarifa/comissao, frete real do vendedor e estorno de cupom/bonus NAO
+  aparecem no JSON do pedido em nenhum canal** - conferido cruzando o pedido
+  900314112 (Meli Conta 2) contra o extrato real do Mercado Livre:
+  `valor_frete` do Tiny veio "0.00" mas o extrato mostrou R$19,85 de frete
+  real; `valor_desconto` veio 0 mas o extrato mostrou R$10,18 de estorno de
+  bonus; nenhum campo bate com a tarifa de 14% cobrada. Por isso
+  `imposto_pct`/`comissao_pct`/`frete_pct`/`ads_pct` em `config.yaml`
+  continuam sendo estimativas manuais, nunca valores lidos do pedido -
+  reconciliar exato exigiria integrar com a API de liquidacao de cada
+  marketplace, fora do escopo deste projeto.
+- **Comissao real do Mercado Livre confirmada em 14%** (extrato do pedido
+  900314112), nao 12% como o `config.example.yaml` original estimava -
+  corrigido para as 4 contas Meli (as 3 alem da Conta 2 estao marcadas como
+  "confirmar" no config, ja que so temos o extrato de uma delas).
+- **Identificador do pedido**: `pedido.obter.php` espera o campo `id` do
+  pedido (ex.: `900314112`), nao o campo `numero` (ex.: `72060`, o numero de
+  exibicao no Tiny) - `numero` e bem menor e e um campo diferente. O codigo
+  agora usa `id` de ponta a ponta (busca, dedupe, storage).
+- **Item do pedido**: campos batem com o que o codigo ja assumia
+  (`codigo`, `quantidade`, `valor_unitario` dentro de `item`), sem ajuste.
+
+### Bugs reais encontrados rodando contra volume real (nao apareceriam com poucos pedidos de teste)
+
+- **`produto.obter.php` espera o parametro `id` (id_produto interno do
+  Tiny), NAO `codigo` (SKU)** - apesar do nome do endpoint sugerir o
+  contrario. Passar `codigo` retorna erro da API ("O parametro id deve ser
+  informado") pra TODO produto. Esse bug fazia ~70% dos pedidos de uma
+  rodada real aparecerem como `custo_ausente=true` quando na verdade tinham
+  custo cadastrado normalmente (ex.: produto id=898908943 tinha
+  `preco_custo=73.49`, id=898221803 tinha `119.99`). Corrigido em
+  `TinyClient.obter_produto`/`obter_custo_produto` - agora recebem
+  `id_produto`, nao `codigo`. `ItemPedido.sku` continua mostrando o
+  `codigo` pra exibicao, so a busca de custo mudou de campo.
+- **Cache de custo "envenenado" por erro temporario de API**: antes,
+  `obter_custo_produto` engolia `TinyApiError` (rate limit, timeout) e
+  devolvia `None`, que era cacheado como se o produto realmente nao tivesse
+  custo - todo pedido seguinte que usasse o MESMO produto na mesma rodada
+  ficava com `custo_ausente` incorreto pelo resto da execucao, mesmo o
+  produto tendo custo real. Corrigido: `obter_custo_produto` agora propaga
+  o erro, e `monitor.py` so cacheia o resultado quando a busca teve sucesso
+  (ver `_TinyClientCustoFake` em `tests/test_monitor.py`).
+- **Checkpoint avancava mesmo com falha de API no meio do ciclo**: se um
+  pedido falhasse ao buscar detalhe (rate limit, timeout), o checkpoint
+  ainda avancava pro "agora" no fim do ciclo - o filtro `dataAtualizacao`
+  nunca mais traria esse pedido de volta (ele ja estava "atualizado" antes
+  do novo checkpoint). 114 pedidos reais de uma conta foram perdidos assim
+  antes da correcao (tive que resetar o checkpoint manualmente pra
+  recupera-los). Corrigido: o checkpoint so avanca se NENHUM pedido falhou
+  por erro de API naquele ciclo.
+- **`tiny_identificador` de Meli Conta 3 e Conta 4 estavam errados**: o
+  palpite original seguia o padrao `"ML_<NOME_DA_LOJA> <numero>"` (que
+  funciona pra Conta 1 e Conta 2), mas Conta 3 e Conta 4 na verdade aparecem
+  como `"Mercado Livre 3"` e `"Mercado Livre 4"` (nome generico + numero, ML
+  nao e consistente entre as proprias subcontas). Corrigido depois de
+  buscar exemplos reais de pedido de cada uma via `--debug-busca` +
+  `--debug-pedido` em lote.
+
+### Alertas: nao dependem de rede/credencial pra nao travar o monitor
+
+`enviar_whatsapp`/`enviar_email` agora tratam `KeyError` de credencial
+faltando no `.env` como um erro recuperavel (loga e segue), em vez de deixar
+a excecao subir e derrubar o `monitor.py --once` inteiro no meio de uma
+rodada - importante porque `ativo: true` no `config.yaml` sem credencial
+configurada (caso comum durante a calibracao) acontecia bem no primeiro
+pedido com margem negativa.

@@ -1,0 +1,141 @@
+# Copie este arquivo para config.yaml e preencha com os numeros reais.
+# Nao commitar config.yaml se ele tiver dados sensiveis do negocio.
+
+geral:
+  intervalo_minutos: 10
+  timezone: "America/Sao_Paulo"
+
+alertas:
+  # Dispara quando margem_contribuicao < margem_negativa_threshold (0 = qualquer prejuizo)
+  margem_negativa_threshold: 0
+
+  whatsapp:
+    ativo: true
+    provider: callmebot # "zapi", "meta" ou "callmebot" (gratuito)
+    # Cada numero listado aqui precisa ter ativado o CallMeBot antes (mandar
+    # "I allow callmebot to send me messages" pro contato +34 621 47 20 71)
+    # e ter sua propria CALLMEBOT_APIKEY_<numero> preenchida no .env.
+    destinatarios:
+      - "5511999999999"
+
+  email:
+    ativo: true
+    destinatarios:
+      - "financeiro@amooutlet.com.br"
+
+# O Grupo Amo tem 4 contas Tiny distintas (uma por CNPJ). Cada conta tem seu
+# proprio token (token_env aponta para a variavel certa no .env) e pode
+# concentrar VARIOS canais de venda dentro dela (ex.: a conta "amoshoes" tem
+# Meli Conta 2, Meli Conta 3, Shopee 1 e TikTok Shop, todos misturados na
+# mesma conta Tiny).
+#
+# tiny_identificador precisa bater EXATAMENTE com ecommerce.nomeEcommerce do
+# pedido (confirmado via --debug-pedido contra pedidos reais - ver README).
+# Para Mercado Livre esse valor ja vem com a subconta embutida
+# (ex.: "ML_AMOSHOESEIRELI 2"), entao nao precisa de nenhum criterio extra
+# pra distinguir Meli 2 de Meli 3 dentro da mesma conta Tiny.
+tiny_contas:
+  conta_amoshoesgyn:
+    nome: "Amo Shoes Goiania (amoshoesgyn)"
+    token_env: TINY_API_TOKEN_AMOSHOESGYN
+    canais:
+      meli_conta_1:
+        nome: "Mercado Livre - Conta 1"
+        tiny_identificador: "ML_AMOOUTLET 1" # confirmado via --debug-pedido 910186770
+        imposto_pct: 4.0
+        ads_pct: 0.0
+        comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
+        # "regra dos R$ 79": so usada no fallback tambem.
+        faixas_frete:
+          - ate_valor: 79.00
+            frete_pct: 40.0
+          - ate_valor: null # null = sem limite superior (ultima faixa)
+            frete_pct: 15.0
+        # Autorizado via OAuth (ml_client.py) - confirmado contra o pedido
+        # real 2000018382739820 (--debug-receita retornou R$61,24).
+        receita_exata_via_ml: true
+
+  conta_amoshoes:
+    nome: "Amo Shoes (amoshoes)"
+    token_env: TINY_API_TOKEN_AMOSHOES
+    canais:
+      meli_conta_2:
+        nome: "Mercado Livre - Conta 2"
+        tiny_identificador: "ML_AMOSHOESEIRELI 2" # confirmado via --debug-pedido 900318268
+        imposto_pct: 4.0
+        ads_pct: 0.0
+        comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
+        frete_pct: 15.0 # so usado se receita_exata_via_ml falhar (fallback)
+        # Autorizado via OAuth (ml_client.py) - o monitor usa a receita
+        # liquida EXATA do Mercado Pago (comissao/frete real, cupom ja
+        # reembolsado pelo ML) em vez de comissao_pct/frete_pct acima.
+        # Ver README - confirmado contra o extrato real do pedido 900314112.
+        receita_exata_via_ml: true
+
+      meli_conta_3:
+        nome: "Mercado Livre - Conta 3"
+        # "Mercado Livre 3" - NAO segue o padrao "ML_<LOJA> 3" (era so um
+        # palpite errado); confirmado via --debug-pedido 900047353.
+        tiny_identificador: "Mercado Livre 3"
+        imposto_pct: 4.0
+        ads_pct: 0.0
+        comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
+        frete_pct: 15.0 # so usado se receita_exata_via_ml falhar (fallback)
+        # Autorizado via OAuth - confirmado contra o pedido real
+        # 2000018511090584 (--debug-receita retornou R$118,40).
+        receita_exata_via_ml: true
+
+      shopee_1:
+        nome: "Shopee - Conta 1"
+        tiny_identificador: "Shopee" # confirmado via --debug-pedido 900319199
+        imposto_pct: 4.0
+        ads_pct: 15.0
+        comissao_pct: 14.0
+        frete_pct: 0.0
+
+      tiktok_shop:
+        nome: "TikTok Shop"
+        tiny_identificador: "TikTok Shop" # confirmado via --debug-pedido 900318459
+        imposto_pct: 4.0
+        ads_pct: 0.0 # PREENCHER: % de ads no TikTok Shop, se houver
+        comissao_pct: 0.0 # PREENCHER: comissao real do TikTok Shop
+        frete_pct: 0.0 # PREENCHER: frete real do TikTok Shop
+
+  conta_inamorato:
+    nome: "Inamorato"
+    token_env: TINY_API_TOKEN_INAMORATO
+    canais:
+      meli_conta_4:
+        nome: "Mercado Livre - Conta 4"
+        # "Mercado Livre 4" (mesmo padrao da conta 3) - confirmado via
+        # --debug-pedido 926128169.
+        tiny_identificador: "Mercado Livre 4"
+        imposto_pct: 4.0
+        ads_pct: 0.0
+        comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
+        frete_pct: 15.0 # so usado se receita_exata_via_ml falhar (fallback)
+        # Autorizado via OAuth - conta de baixo volume, ainda sem um pedido
+        # recente o bastante pra confirmar --debug-receita com sucesso (a
+        # API do ML parece so servir pedidos bem recentes - ver README), mas
+        # o fallback e seguro entao fica ligado desde ja.
+        receita_exata_via_ml: true
+
+      amazon:
+        nome: "Amazon"
+        tiny_identificador: "Amazon" # confirmado via --debug-pedido 926065656
+        imposto_pct: 4.0 # PREENCHER: imposto real da Amazon
+        ads_pct: 0.0 # PREENCHER: % de ads na Amazon, se houver
+        comissao_pct: 0.0 # PREENCHER: comissao real da Amazon
+        frete_pct: 0.0 # PREENCHER: frete real da Amazon
+
+  conta_28849110000141:
+    nome: "CNPJ 28.849.110/0001-41"
+    token_env: TINY_API_TOKEN_28849110000141
+    canais:
+      shopee_2:
+        nome: "Shopee - Conta 2"
+        tiny_identificador: "Shopee" # confirmado via --debug-pedido 1099720542
+        imposto_pct: 4.0
+        ads_pct: 15.6
+        comissao_pct: 14.0
+        frete_pct: 0.0

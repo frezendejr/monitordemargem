@@ -1,0 +1,10 @@
+.env
+config.yaml
+ml_tokens_*.json
+*.db
+*.xlsx
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
