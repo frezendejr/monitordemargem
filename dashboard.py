@@ -25,9 +25,18 @@ st.set_page_config(page_title="Margem Grupo Amo", layout="wide")
 
 
 def _config(chave: str) -> str:
-    """Le de st.secrets (deploy) ou do .env (local)."""
-    if chave in st.secrets:
-        return st.secrets[chave]
+    """Le de st.secrets (deploy) ou do .env (local).
+
+    st.secrets lanca excecao so de ser acessado (nem precisa fazer lookup de
+    chave) quando nao existe NENHUM secrets.toml - o que e o caso normal
+    rodando local via `streamlit run` - por isso o acesso a st.secrets fica
+    protegido, senao o fallback pro .env nunca seria alcancado.
+    """
+    try:
+        if chave in st.secrets:
+            return st.secrets[chave]
+    except Exception:
+        pass
     return os.environ[chave]
 
 
