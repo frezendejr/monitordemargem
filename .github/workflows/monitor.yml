@@ -21,7 +21,9 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Escrever config.yaml a partir do secret
-        run: printf '%s' "${{ secrets.CONFIG_YAML }}" > config.yaml
+        env:
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+        run: printf '%s' "$CONFIG_YAML" > config.yaml
 
       - name: Rodar um ciclo do monitor
         env:
