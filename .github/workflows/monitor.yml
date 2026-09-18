@@ -1,0 +1,55 @@
+name: Monitor de margem (ciclo agendado)
+
+on:
+  schedule:
+    # A cada 15 min. GitHub nao garante pontualidade exata (pode atrasar
+    # alguns minutos em horario de pico) - normal pra Actions agendado.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {} # permite disparar manual pela aba Actions do GitHub
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Escrever config.yaml a partir do secret
+        run: printf '%s' "${{ secrets.CONFIG_YAML }}" > config.yaml
+
+      - name: Rodar um ciclo do monitor
+        env:
+          MARGIN_MONITOR_CLOUD: "1"
+
+          TINY_API_TOKEN_AMOSHOESGYN: ${{ secrets.TINY_API_TOKEN_AMOSHOESGYN }}
+          TINY_API_TOKEN_AMOSHOES: ${{ secrets.TINY_API_TOKEN_AMOSHOES }}
+          TINY_API_TOKEN_INAMORATO: ${{ secrets.TINY_API_TOKEN_INAMORATO }}
+          TINY_API_TOKEN_28849110000141: ${{ secrets.TINY_API_TOKEN_28849110000141 }}
+
+          ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+          ML_APP_ID_MELI_CONTA_1: ${{ secrets.ML_APP_ID_MELI_CONTA_1 }}
+          ML_CLIENT_SECRET_MELI_CONTA_1: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_1 }}
+          ML_APP_ID_MELI_CONTA_2: ${{ secrets.ML_APP_ID_MELI_CONTA_2 }}
+          ML_CLIENT_SECRET_MELI_CONTA_2: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_2 }}
+          ML_APP_ID_MELI_CONTA_3: ${{ secrets.ML_APP_ID_MELI_CONTA_3 }}
+          ML_CLIENT_SECRET_MELI_CONTA_3: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_3 }}
+          ML_APP_ID_MELI_CONTA_4: ${{ secrets.ML_APP_ID_MELI_CONTA_4 }}
+          ML_CLIENT_SECRET_MELI_CONTA_4: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_4 }}
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          CALLMEBOT_APIKEY_554899665790: ${{ secrets.CALLMEBOT_APIKEY_554899665790 }}
+
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_REMETENTE: ${{ secrets.SMTP_REMETENTE }}
+        run: python monitor_cloud.py

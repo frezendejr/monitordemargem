@@ -53,17 +53,68 @@ def _tokens_path(conta: str) -> Path:
     return Path(f"ml_tokens_{conta}.json")
 
 
+def _modo_nuvem() -> bool:
+    """Em ambiente sem disco persistente (GitHub Actions), os tokens tem
+    que ir pro Supabase - senao o refresh_token (uso unico) se perde entre
+    execucoes e a autorizacao inteira quebra depois de 1 rodada. Ativado
+    via MARGIN_MONITOR_CLOUD=1 (setado no workflow do GitHub Actions)."""
+    return os.environ.get("MARGIN_MONITOR_CLOUD") == "1"
+
+
 def _salvar_tokens(conta: str, dados: dict) -> None:
     dados = dict(dados)
     dados["obtido_em"] = time.time()
-    _tokens_path(conta).write_text(json.dumps(dados, indent=2), encoding="utf-8")
+    if _modo_nuvem():
+        _salvar_tokens_supabase(conta, dados)
+    else:
+        _tokens_path(conta).write_text(json.dumps(dados, indent=2), encoding="utf-8")
 
 
 def _carregar_tokens(conta: str) -> dict | None:
+    if _modo_nuvem():
+        return _carregar_tokens_supabase(conta)
     path = _tokens_path(conta)
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _salvar_tokens_supabase(conta: str, dados: dict) -> None:
+    url = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    payload = {
+        "conta": conta,
+        "access_token": dados["access_token"],
+        "refresh_token": dados["refresh_token"],
+        "expires_in": dados["expires_in"],
+        "obtido_em": dados["obtido_em"],
+    }
+    resp = requests.post(
+        f"{url}/rest/v1/margin_monitor_ml_tokens?on_conflict=conta",
+        json=payload,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
+def _carregar_tokens_supabase(conta: str) -> dict | None:
+    url = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    resp = requests.get(
+        f"{url}/rest/v1/margin_monitor_ml_tokens",
+        params={"conta": f"eq.{conta}", "select": "*"},
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    linhas = resp.json()
+    return linhas[0] if linhas else None
 
 
 def trocar_code_por_token(conta: str, app_id: str, client_secret: str, code: str, redirect_uri: str) -> dict:

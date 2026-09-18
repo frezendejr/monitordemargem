@@ -49,30 +49,46 @@ def carregar_custos(caminho: str) -> dict[str, float]:
     return custos
 
 
+_PAGINA = 1000
+
+
 def sobrepor_custos_do_dashboard(custos: dict[str, float]) -> dict[str, float]:
-    """Sobrepoe (in-place, e retorna) `custos` com os valores que o time
-    preencheu direto no dashboard (tabela margin_monitor_custos no
-    Supabase) - esses ganham prioridade sobre a planilha, ja que sao a
-    correcao mais recente pra SKUs que a planilha nao tinha.
+    """Sobrepoe (in-place, e retorna) `custos` com os valores que estao em
+    margin_monitor_custos no Supabase - tanto os migrados da planilha
+    original (gerar_custos_para_supabase.py) quanto os que o time preencheu
+    direto no dashboard. Esses ganham prioridade sobre a planilha local,
+    ja que sao a fonte mais recente.
+
+    Passar `custos={}` carrega SOMENTE do Supabase - e o que o
+    monitor_cloud.py faz (sem planilha local disponivel no runner).
+
+    Pagina em blocos de 1000 (limite padrao do Supabase) - a tabela ja
+    passou de ~2000 linhas depois da migracao da planilha original.
 
     Falha de rede/credencial aqui NUNCA deve impedir o monitor de rodar -
-    so loga e segue com o que a planilha ja tinha.
+    so loga e segue com o que ja tinha em `custos`.
     """
     try:
         url = os.environ["SUPABASE_URL"].rstrip("/")
         key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-        resp = requests.get(
-            f"{url}/rest/v1/margin_monitor_custos",
-            params={"select": "sku,custo"},
-            headers={"apikey": key, "Authorization": f"Bearer {key}"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-    except (KeyError, requests.RequestException):
-        logger.warning("Nao foi possivel buscar custos manuais do dashboard (Supabase) - usando so a planilha")
-        return custos
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
 
-    for linha in resp.json():
-        custos[linha["sku"]] = float(linha["custo"])
+        inicio = 0
+        while True:
+            resp = requests.get(
+                f"{url}/rest/v1/margin_monitor_custos",
+                params={"select": "sku,custo"},
+                headers={**headers, "Range": f"{inicio}-{inicio + _PAGINA - 1}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            pagina = resp.json()
+            for linha in pagina:
+                custos[linha["sku"]] = float(linha["custo"])
+            if len(pagina) < _PAGINA:
+                break
+            inicio += _PAGINA
+    except (KeyError, requests.RequestException):
+        logger.warning("Nao foi possivel buscar custos do Supabase - usando so o que ja tinha")
 
     return custos

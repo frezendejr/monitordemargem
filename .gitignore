@@ -2,6 +2,8 @@
 config.yaml
 ml_tokens_*.json
 *.db
+*.db-shm
+*.db-wal
 *.xlsx
 *.log
 __pycache__/

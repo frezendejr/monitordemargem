@@ -178,11 +178,59 @@ pedidos antigos na calibracao. Por isso o canal so usa a receita exata
 motivo (pedido antigo, token expirado, rate limit) - ver
 `_resolver_receita_e_config` em `monitor.py`.
 
+## Rodando na nuvem (GitHub Actions, sem depender do PC)
+
+`monitor.py` (local, loop continuo ou `--once`) depende de um PC ligado. Pra
+rodar sem isso, `monitor_cloud.py` e uma versao stateless (sem SQLite, sem
+loop - um ciclo so por execucao) feita pra rodar via
+`.github/workflows/monitor.yml` (cron a cada 15 min + `workflow_dispatch`
+pra disparar manual pela aba Actions do GitHub).
+
+**Diferencas do modo nuvem:**
+- Dedupe/checkpoint: `storage_supabase.py` em vez de `storage.py` (SQLite) -
+  usa a propria `margin_monitor_pedidos` como fonte de dedupe (se o pedido
+  ja esta la, ja foi processado) + uma tabela `margin_monitor_checkpoint`
+  nova, so pra isso.
+- Custo: direto do Supabase (`sobrepor_custos_do_dashboard({})`, sem
+  planilha local) - por isso a planilha `custo_por_codigo_pai.xlsx` precisa
+  ter sido migrada pro Supabase uma vez (rodado manualmente, ver script
+  inline usado na migracao - nao ha um comando dedicado ainda, foi feito
+  direto).
+- Token do Mercado Livre: com `MARGIN_MONITOR_CLOUD=1` setado, `ml_client.py`
+  persiste o access_token/refresh_token na tabela `margin_monitor_ml_tokens`
+  do Supabase em vez de arquivo local `ml_tokens_*.json` - **essencial**,
+  porque o refresh_token e de uso unico e um runner do GitHub Actions nao
+  tem disco persistente entre execucoes (perderia o token depois do 1o
+  ciclo sem isso).
+- Nao escreve `dashboard_margem.xlsx` (nao faz sentido num runner efemero).
+
+**Setup (uma vez):**
+
+1. Rodar `supabase_schema_cloud.sql` no Supabase (cria
+   `margin_monitor_checkpoint` e `margin_monitor_ml_tokens`, sem RLS pra
+   chave anon - so service role acessa).
+2. Configurar os **Secrets** do repositorio no GitHub (Settings → Secrets
+   and variables → Actions → New repository secret), um por variavel usada
+   no workflow: os `TINY_API_TOKEN_*`, `ML_APP_ID_*`/`ML_CLIENT_SECRET_*`,
+   `ML_REDIRECT_URI`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+   `CALLMEBOT_APIKEY_*` (ou credenciais de outro provider de WhatsApp),
+   `SMTP_*` (se for usar e-mail), e **`CONFIG_YAML`** (o conteudo INTEIRO do
+   `config.yaml` colado como um unico secret - o workflow escreve isso num
+   arquivo `config.yaml` no runner antes de rodar).
+3. Testar disparando manual: aba **Actions** do repositorio no GitHub →
+   "Monitor de margem (ciclo agendado)" → **"Run workflow"**.
+
+Depois de confirmar que funciona, o cron cuida do resto sozinho - nao
+precisa de PC ligado, nem de tarefa agendada do Windows.
+
 ## Arquivos
 
-- `monitor.py` - loop principal (`--once` roda uma vez, sem argumento roda em
-  loop continuo). `--custo-planilha` sobrescreve o caminho da planilha de
-  custo (padrao `custo_por_codigo_pai.xlsx`).
+- `monitor.py` - loop principal LOCAL (`--once` roda uma vez, sem argumento
+  roda em loop continuo). `--custo-planilha` sobrescreve o caminho da
+  planilha de custo (padrao `custo_por_codigo_pai.xlsx`).
+- `monitor_cloud.py` - versao stateless pra rodar no GitHub Actions (sem
+  SQLite, sem loop - ver secao "Rodando na nuvem"). `storage_supabase.py` -
+  dedupe/checkpoint via Supabase, usado so por ele.
 - `tiny_client.py` - cliente da API do Tiny (pedidos + identificacao de
   canal). `obter_produto`/`obter_custo_produto`/`--debug-produto` ainda
   existem pra depuracao manual, mas o `monitor.py` nao usa mais isso pra
