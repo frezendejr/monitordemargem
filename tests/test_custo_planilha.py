@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openpyxl import Workbook
 
-from custo_planilha import carregar_custos
+from custo_planilha import carregar_custos, sobrepor_custos_do_dashboard
 
 
 def _criar_planilha(caminho, linhas):
@@ -39,3 +39,29 @@ def test_linha_sem_custo_nao_entra_no_dict(tmp_path):
     custos = carregar_custos(str(caminho))
 
     assert custos == {}
+
+
+def test_sobrepor_custos_sem_credencial_supabase_nao_quebra(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    custos = sobrepor_custos_do_dashboard({"912837": 73.49})
+
+    assert custos == {"912837": 73.49}  # nao mudou, so nao quebrou
+
+
+def test_sobrepor_custos_do_dashboard_tem_prioridade(monkeypatch):
+    class _RespostaFake:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"sku": "999999", "custo": 42.0}, {"sku": "912837", "custo": 80.0}]
+
+    monkeypatch.setenv("SUPABASE_URL", "https://exemplo.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "chave-fake")
+    monkeypatch.setattr("custo_planilha.requests.get", lambda *a, **k: _RespostaFake())
+
+    custos = sobrepor_custos_do_dashboard({"912837": 73.49})
+
+    assert custos == {"912837": 80.0, "999999": 42.0}  # dashboard sobrescreveu 912837 e adicionou 999999

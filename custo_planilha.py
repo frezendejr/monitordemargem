@@ -9,7 +9,13 @@ que faltar sem depender de acesso de escrita ao Tiny.
 
 from __future__ import annotations
 
+import logging
+import os
+
+import requests
 from openpyxl import load_workbook
+
+logger = logging.getLogger(__name__)
 
 COL_CUSTO = 2
 COL_SKUS_DO_GRUPO = 5
@@ -39,5 +45,34 @@ def carregar_custos(caminho: str) -> dict[str, float]:
             sku = sku.strip()
             if sku:
                 custos[sku] = float(custo)
+
+    return custos
+
+
+def sobrepor_custos_do_dashboard(custos: dict[str, float]) -> dict[str, float]:
+    """Sobrepoe (in-place, e retorna) `custos` com os valores que o time
+    preencheu direto no dashboard (tabela margin_monitor_custos no
+    Supabase) - esses ganham prioridade sobre a planilha, ja que sao a
+    correcao mais recente pra SKUs que a planilha nao tinha.
+
+    Falha de rede/credencial aqui NUNCA deve impedir o monitor de rodar -
+    so loga e segue com o que a planilha ja tinha.
+    """
+    try:
+        url = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+        resp = requests.get(
+            f"{url}/rest/v1/margin_monitor_custos",
+            params={"select": "sku,custo"},
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except (KeyError, requests.RequestException):
+        logger.warning("Nao foi possivel buscar custos manuais do dashboard (Supabase) - usando so a planilha")
+        return custos
+
+    for linha in resp.json():
+        custos[linha["sku"]] = float(linha["custo"])
 
     return custos
