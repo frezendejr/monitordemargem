@@ -228,6 +228,42 @@ def calcular_meta_periodo(
     return round(total_fat, 2), round(total_margem, 2), faltando
 
 
+def calcular_projecao_mes(
+    pedidos_hist: pd.DataFrame, mes: date, meta_mes: dict | None, indices: dict[int, float]
+) -> tuple[float | None, float | None]:
+    """Projeta o faturamento do MES INTEIRO (nao so o periodo filtrado na
+    sidebar) a partir do ritmo real ate hoje: calcula quanto cada "unidade
+    de peso de sazonalidade" valeu em R$ nos dias ja passados do mes, e
+    aplica esse mesmo valor aos dias que ainda faltam. Retorna
+    (projecao_r$, pct_da_meta) - qualquer um pode vir None se nao houver
+    dado/meta suficiente pra calcular."""
+    hoje = date.today()
+    dias_mes = _dias_do_mes(mes)
+    dias_passados = [d for d in dias_mes if d <= hoje]
+    dias_futuros = [d for d in dias_mes if d > hoje]
+    if not dias_passados:
+        return None, None
+
+    receita_mes_ate_agora = pedidos_hist[
+        (pedidos_hist["data_pedido_dt"].dt.date >= dias_mes[0])
+        & (pedidos_hist["data_pedido_dt"].dt.date <= min(hoje, dias_mes[-1]))
+    ]["receita"].sum()
+
+    soma_pesos_passados = sum(indices[d.weekday()] for d in dias_passados)
+    soma_pesos_futuros = sum(indices[d.weekday()] for d in dias_futuros)
+    if not soma_pesos_passados:
+        return None, None
+
+    valor_por_peso = receita_mes_ate_agora / soma_pesos_passados
+    projecao = receita_mes_ate_agora + valor_por_peso * soma_pesos_futuros
+
+    pct_meta = None
+    if meta_mes and meta_mes.get("meta_faturamento"):
+        pct_meta = round(projecao / meta_mes["meta_faturamento"] * 100, 1)
+
+    return round(projecao, 2), pct_meta
+
+
 st.title("📊 Margem de contribuição — Grupo Amo")
 
 try:
@@ -402,6 +438,25 @@ with aba_visao:
         )
         if meta_incompleta:
             st.caption("⚠️ Algum mês do período selecionado ainda não tem meta cadastrada acima.")
+
+        mes_corrente = date.today().replace(day=1)
+        projecao_mes, pct_projecao_meta = calcular_projecao_mes(
+            pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_dia_semana
+        )
+        cp1, cp2 = st.columns(2)
+        cp1.metric(
+            f"Projeção de Faturamento ({mes_corrente.strftime('%m/%Y')})",
+            _fmt_moeda(projecao_mes) if projecao_mes is not None else "sem dado suficiente",
+        )
+        cp2.metric(
+            "% da Meta (projeção)",
+            f"{pct_projecao_meta:.1f}%" if pct_projecao_meta is not None else "sem meta",
+            delta=(f"{pct_projecao_meta - 100:+.1f}pp" if pct_projecao_meta is not None else None),
+        )
+        st.caption(
+            "Projeção sempre do MÊS CORRENTE inteiro (independente do período filtrado ao lado): "
+            "pega o ritmo real de venda por dia da semana já observado este mês e extrapola pros dias que faltam."
+        )
 
         st.divider()
 
