@@ -120,6 +120,114 @@ def _fmt_moeda(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 
+# ----------------------------------------------------------------------
+# Metas (faturamento/margem do mes, divididas por dia via sazonalidade)
+# ----------------------------------------------------------------------
+
+def carregar_metas() -> dict:
+    """{mes (date, dia 1): {"meta_faturamento":..., "meta_margem_pct":...}}"""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    resp = requests.get(
+        f"{url}/rest/v1/margin_monitor_metas",
+        params={"select": "mes,meta_faturamento,meta_margem_pct"},
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return {pd.to_datetime(r["mes"]).date(): r for r in resp.json()}
+
+
+def salvar_meta(mes: date, meta_faturamento: float, meta_margem_pct: float) -> None:
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    resp = requests.post(
+        f"{url}/rest/v1/margin_monitor_metas?on_conflict=mes",
+        json=[
+            {
+                "mes": mes.isoformat(),
+                "meta_faturamento": meta_faturamento,
+                "meta_margem_pct": meta_margem_pct,
+                "atualizado_em": pd.Timestamp.utcnow().isoformat(),
+            }
+        ],
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
+def calcular_indices_dia_semana(pedidos_hist: pd.DataFrame, janela_dias: int = 90) -> dict[int, float]:
+    """Sazonalidade por dia da semana (0=segunda...6=domingo): media de
+    receita de cada dia da semana nos ultimos `janela_dias`, normalizada pela
+    media geral. Indice 1.0 = dia tipico; 1.3 = 30% acima da media. Mesmo
+    metodo da planilha de metas de referencia ("Índices por dia da semana
+    calculados sobre os dias com dado verificado")."""
+    limite = pd.Timestamp(date.today() - timedelta(days=janela_dias))
+    hist = pedidos_hist[pedidos_hist["data_pedido_dt"] >= limite]
+    if hist.empty:
+        return {i: 1.0 for i in range(7)}
+
+    por_data = hist.groupby(hist["data_pedido_dt"].dt.date)["receita"].sum()
+    por_data.index = pd.to_datetime(por_data.index)
+    media_por_dia_semana = por_data.groupby(por_data.index.dayofweek).mean()
+    media_geral = media_por_dia_semana.mean()
+    if not media_geral:
+        return {i: 1.0 for i in range(7)}
+
+    indices = (media_por_dia_semana / media_geral).to_dict()
+    return {i: indices.get(i, 1.0) for i in range(7)}
+
+
+def _dias_do_mes(mes: date) -> list[date]:
+    proximo = date(mes.year + 1, 1, 1) if mes.month == 12 else date(mes.year, mes.month + 1, 1)
+    dias, d = [], mes
+    while d < proximo:
+        dias.append(d)
+        d += timedelta(days=1)
+    return dias
+
+
+def _meses_no_intervalo(data_inicio: date, data_fim: date) -> list[date]:
+    meses, atual = [], data_inicio.replace(day=1)
+    while atual <= data_fim:
+        meses.append(atual)
+        atual = date(atual.year + 1, 1, 1) if atual.month == 12 else date(atual.year, atual.month + 1, 1)
+    return meses
+
+
+def calcular_meta_periodo(
+    data_inicio: date, data_fim: date, metas_por_mes: dict, indices: dict[int, float]
+) -> tuple[float, float, bool]:
+    """Reparte a meta MENSAL pelos dias do periodo pedido, proporcional ao
+    indice de sazonalidade de cada dia da semana. Retorna
+    (meta_faturamento, meta_margem_r$, tem_mes_sem_meta_cadastrada)."""
+    total_fat = 0.0
+    total_margem = 0.0
+    faltando = False
+    for mes in _meses_no_intervalo(data_inicio, data_fim):
+        meta_mes = metas_por_mes.get(mes)
+        if not meta_mes:
+            faltando = True
+            continue
+        dias_mes = _dias_do_mes(mes)
+        soma_pesos_mes = sum(indices[d.weekday()] for d in dias_mes)
+        if not soma_pesos_mes:
+            continue
+        for d in dias_mes:
+            if data_inicio <= d <= data_fim:
+                peso_dia = indices[d.weekday()] / soma_pesos_mes
+                meta_dia_fat = meta_mes["meta_faturamento"] * peso_dia
+                total_fat += meta_dia_fat
+                total_margem += meta_dia_fat * meta_mes["meta_margem_pct"] / 100
+    return round(total_fat, 2), round(total_margem, 2), faltando
+
+
 st.title("📊 Margem de contribuição — Grupo Amo")
 
 try:
@@ -221,6 +329,137 @@ aba_visao, aba_produtos, aba_custos, aba_vendas = st.tabs(
 
 # ---- Visão geral -------------------------------------------------------
 with aba_visao:
+    # -- Meta do mes: cadastro + comparativo com o realizado --------------
+    try:
+        metas_por_mes = carregar_metas()
+    except Exception:
+        metas_por_mes = {}
+
+    with st.expander("🎯 Meta do mês (faturamento + margem)"):
+        mes_config = st.date_input(
+            "Configurar meta de qual mês?", value=date.today().replace(day=1), format="DD/MM/YYYY"
+        ).replace(day=1)
+        meta_existente = metas_por_mes.get(mes_config, {})
+        col_a, col_b = st.columns(2)
+        novo_fat = col_a.number_input(
+            "Meta de faturamento do mês (R$)",
+            min_value=0.0,
+            step=1000.0,
+            value=float(meta_existente.get("meta_faturamento", 0.0)),
+        )
+        novo_pct = col_b.number_input(
+            "Meta de margem (%)",
+            min_value=0.0,
+            max_value=100.0,
+            step=0.5,
+            value=float(meta_existente.get("meta_margem_pct", 15.0)),
+        )
+        st.caption(
+            "A meta é sempre do MÊS inteiro - a divisão por dia é automática, "
+            "proporcional a como cada dia da semana costuma vender (últimos 90 dias)."
+        )
+        if st.button("💾 Salvar meta"):
+            try:
+                salvar_meta(mes_config, novo_fat, novo_pct)
+                st.success(f"Meta de {mes_config.strftime('%m/%Y')} salva.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Falha ao salvar: {e}")
+
+    indices_dia_semana = calcular_indices_dia_semana(pedidos)
+    meta_fat_periodo, meta_margem_periodo, meta_incompleta = calcular_meta_periodo(
+        data_inicio, data_fim, metas_por_mes, indices_dia_semana
+    )
+    # Faturamento/margem real do periodo SEMPRE de todas as contas/canais
+    # (a meta e um numero unico da empresa toda - nao faz sentido comparar
+    # com um subconjunto filtrado na sidebar).
+    pedidos_periodo_empresa = pedidos[
+        (pedidos["data_pedido_dt"].dt.date >= data_inicio) & (pedidos["data_pedido_dt"].dt.date <= data_fim)
+    ]
+    faturamento_real = pedidos_periodo_empresa["receita"].sum()
+    margem_real = pedidos_periodo_empresa["margem_contribuicao"].sum()
+
+    with st.container(border=True):
+        st.caption("Faturamento e margem SEMPRE somam todas as contas/canais, independente do filtro ao lado.")
+        cm1, cm2 = st.columns(2)
+        cm1.metric("Faturamento", _fmt_moeda(faturamento_real))
+        cm2.metric(
+            "Meta de Faturamento",
+            _fmt_moeda(meta_fat_periodo) if not meta_incompleta else "sem meta",
+            delta=(f"{(faturamento_real / meta_fat_periodo * 100 - 100):+.1f}%" if meta_fat_periodo else None),
+        )
+        cm3, cm4 = st.columns(2)
+        cm3.metric("Margem", _fmt_moeda(margem_real))
+        cm4.metric(
+            "Meta de Margem",
+            _fmt_moeda(meta_margem_periodo) if not meta_incompleta else "sem meta",
+            delta=(f"{(margem_real / meta_margem_periodo * 100 - 100):+.1f}%" if meta_margem_periodo else None),
+        )
+        if meta_incompleta:
+            st.caption("⚠️ Algum mês do período selecionado ainda não tem meta cadastrada acima.")
+
+    # -- Vendas abaixo do custo (alerta) -----------------------------------
+    abaixo_custo = itens_f[
+        (itens_f["custo_ausente"] == False)  # noqa: E712
+        & (itens_f["cmv"] > 0)
+        & (itens_f["receita"] < itens_f["cmv"])
+    ]
+    n_abaixo_custo = len(abaixo_custo)
+
+    if n_abaixo_custo > 0:
+        st.markdown(
+            """
+            <style>
+            @keyframes piscar_abaixo_custo { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+            .alerta-abaixo-custo {
+                animation: piscar_abaixo_custo 1.1s infinite;
+                background-color: #d32f2f; color: white; padding: 14px;
+                border-radius: 8px; font-weight: bold; text-align: center;
+                margin-bottom: 8px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="alerta-abaixo-custo">🚨 {n_abaixo_custo} venda(s) abaixo do CUSTO da mercadoria '
+            f'no período (nem o CMV a receita cobre) - clique abaixo pra ver quais</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button(f"🔎 Ver os {n_abaixo_custo} caso(s) de venda abaixo do custo"):
+            st.session_state["mostrar_abaixo_custo"] = not st.session_state.get("mostrar_abaixo_custo", False)
+
+        if st.session_state.get("mostrar_abaixo_custo"):
+            detalhe = abaixo_custo.copy()
+            detalhe["codigo_pai"] = detalhe["sku"].map(_codigo_pai)
+            detalhe["perda_por_unidade"] = detalhe["cmv"] - detalhe["receita"]
+            resumo_abaixo_custo = (
+                detalhe.groupby(["canal", "codigo_pai", "sku"])
+                .agg(
+                    quantidade=("quantidade", "sum"),
+                    receita=("receita", "sum"),
+                    cmv=("cmv", "sum"),
+                    perda=("perda_por_unidade", "sum"),
+                    pedidos=("numero_pedido", "nunique"),
+                )
+                .reset_index()
+                .sort_values("perda", ascending=False)
+            )
+            st.dataframe(
+                resumo_abaixo_custo,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "canal": "Marketplace/conta",
+                    "codigo_pai": "Código pai",
+                    "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+                    "cmv": st.column_config.NumberColumn("CMV", format="R$ %.2f"),
+                    "perda": st.column_config.NumberColumn("Perda (CMV − receita)", format="R$ %.2f"),
+                },
+            )
+    else:
+        st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
+
     with st.container(border=True):
         c1, c2 = st.columns(2)
         c1.metric("Pedidos", f"{len(pedidos_f):,}".replace(",", "."))
