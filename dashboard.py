@@ -17,6 +17,7 @@ import io
 import os
 from datetime import date, timedelta
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -138,6 +139,21 @@ def salvar_custos_no_supabase(registros: list[dict]) -> None:
 
 def _fmt_moeda(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+
+
+def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, titulo: str):
+    """Grafico de pizza via Altair (ja vem junto com o Streamlit, nao
+    precisa de dependencia nova) - st.bar_chart/st.altair_chart nativos do
+    Streamlit nao tem tipo pizza."""
+    base = alt.Chart(df).encode(
+        theta=alt.Theta(f"{campo_valor}:Q", stack=True),
+        color=alt.Color(f"{campo_categoria}:N", legend=alt.Legend(title=titulo)),
+        tooltip=[
+            alt.Tooltip(f"{campo_categoria}:N", title=titulo),
+            alt.Tooltip(f"{campo_valor}:Q", title="Valor", format=",.2f"),
+        ],
+    )
+    return base.mark_arc(outerRadius=110)
 
 
 # ----------------------------------------------------------------------
@@ -791,7 +807,7 @@ with aba_visao:
     else:
         st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
 
-    st.subheader("Margem por canal")
+    st.subheader("Faturamento e margem por marketplace")
     por_canal = (
         pedidos_f.groupby("canal")
         .agg(receita=("receita", "sum"), margem=("margem_contribuicao", "sum"), pedidos=("numero_pedido", "count"))
@@ -799,10 +815,29 @@ with aba_visao:
     )
     por_canal["margem_pct"] = (por_canal["margem"] / por_canal["receita"] * 100).round(1)
     por_canal = por_canal.sort_values("margem", ascending=False)
-    st.bar_chart(por_canal.set_index("canal")["margem"])
-    st.dataframe(por_canal, hide_index=True, use_container_width=True)
+    por_canal["margem_abs"] = por_canal["margem"].abs()
 
-    st.subheader("Margem por conta Tiny (CNPJ)")
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        st.altair_chart(
+            _grafico_pizza(por_canal, "canal", "receita", "Marketplace"), use_container_width=True
+        )
+        st.caption("Faturamento por marketplace")
+    with pc2:
+        st.altair_chart(
+            _grafico_pizza(por_canal, "canal", "margem_abs", "Marketplace"), use_container_width=True
+        )
+        st.caption(
+            "Margem por marketplace (tamanho da fatia = valor absoluto - passe o mouse pra ver o sinal "
+            "real; canal com margem negativa também aparece como fatia, confira a tabela abaixo)."
+        )
+    st.dataframe(
+        por_canal[["canal", "receita", "margem", "margem_pct", "pedidos"]],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.subheader("Detalhado por conta Tiny (CNPJ)")
     por_conta = (
         pedidos_f.groupby("conta_tiny")
         .agg(receita=("receita", "sum"), margem=("margem_contribuicao", "sum"), pedidos=("numero_pedido", "count"))
@@ -810,7 +845,11 @@ with aba_visao:
     )
     por_conta["margem_pct"] = (por_conta["margem"] / por_conta["receita"] * 100).round(1)
     por_conta = por_conta.sort_values("margem", ascending=False)
-    st.bar_chart(por_conta.set_index("conta_tiny")["margem"])
+
+    st.altair_chart(
+        _grafico_pizza(por_conta, "conta_tiny", "receita", "Conta"), use_container_width=True
+    )
+    st.caption("Faturamento por conta")
     st.dataframe(por_conta, hide_index=True, use_container_width=True)
 
 # ---- Metas diárias --------------------------------------------------------
