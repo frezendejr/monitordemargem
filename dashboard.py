@@ -121,36 +121,50 @@ def _fmt_moeda(valor: float) -> str:
 
 
 # ----------------------------------------------------------------------
-# Metas (faturamento/margem do mes, divididas por dia via sazonalidade)
+# Metas (faturamento/margem POR MES E POR CANAL - a mistura entre canais e
+# uma decisao estrategica do time, ex.: "crescer Amazon, manter Shoppe 1",
+# nao algo que da pra calcular olhando historico. A divisao por DIA dentro
+# do mes/canal ja e automatica, via sazonalidade propria de cada canal.
+# Hiper Meta e um segundo nivel, mais agressivo, que a planilha de
+# referencia do time ja usa.)
 # ----------------------------------------------------------------------
 
 def carregar_metas() -> dict:
-    """{mes (date, dia 1): {"meta_faturamento":..., "meta_margem_pct":...}}"""
+    """{mes (date, dia 1): {canal: {"meta_faturamento":..., "hiper_meta_faturamento":..., "meta_margem_pct":...}}}"""
     url = _config("SUPABASE_URL").rstrip("/")
     key = _config("SUPABASE_ANON_KEY")
     resp = requests.get(
         f"{url}/rest/v1/margin_monitor_metas",
-        params={"select": "mes,meta_faturamento,meta_margem_pct"},
+        params={"select": "mes,canal,meta_faturamento,hiper_meta_faturamento,meta_margem_pct"},
         headers={"apikey": key, "Authorization": f"Bearer {key}"},
         timeout=15,
     )
     resp.raise_for_status()
-    return {pd.to_datetime(r["mes"]).date(): r for r in resp.json()}
+    metas: dict = {}
+    for r in resp.json():
+        mes = pd.to_datetime(r["mes"]).date()
+        metas.setdefault(mes, {})[r["canal"]] = r
+    return metas
 
 
-def salvar_meta(mes: date, meta_faturamento: float, meta_margem_pct: float) -> None:
+def salvar_metas_canal(mes: date, registros: list[dict]) -> None:
+    """`registros`: [{"canal":..., "meta_faturamento":..., "hiper_meta_faturamento":..., "meta_margem_pct":...}, ...]"""
     url = _config("SUPABASE_URL").rstrip("/")
     key = _config("SUPABASE_ANON_KEY")
+    payload = [
+        {
+            "mes": mes.isoformat(),
+            "canal": r["canal"],
+            "meta_faturamento": r["meta_faturamento"],
+            "hiper_meta_faturamento": r.get("hiper_meta_faturamento"),
+            "meta_margem_pct": r["meta_margem_pct"],
+            "atualizado_em": pd.Timestamp.utcnow().isoformat(),
+        }
+        for r in registros
+    ]
     resp = requests.post(
-        f"{url}/rest/v1/margin_monitor_metas?on_conflict=mes",
-        json=[
-            {
-                "mes": mes.isoformat(),
-                "meta_faturamento": meta_faturamento,
-                "meta_margem_pct": meta_margem_pct,
-                "atualizado_em": pd.Timestamp.utcnow().isoformat(),
-            }
-        ],
+        f"{url}/rest/v1/margin_monitor_metas?on_conflict=mes,canal",
+        json=payload,
         headers={
             "apikey": key,
             "Authorization": f"Bearer {key}",
@@ -164,16 +178,16 @@ def salvar_meta(mes: date, meta_faturamento: float, meta_margem_pct: float) -> N
 
 def calcular_indices_dia_semana(pedidos_hist: pd.DataFrame, janela_dias: int = 90) -> dict[int, float]:
     """Sazonalidade por dia da semana (0=segunda...6=domingo): media de
-    receita de cada dia da semana nos ultimos `janela_dias`, normalizada pela
-    media geral. Indice 1.0 = dia tipico; 1.3 = 30% acima da media. Mesmo
-    metodo da planilha de metas de referencia ("Índices por dia da semana
-    calculados sobre os dias com dado verificado")."""
+    faturamento de cada dia da semana nos ultimos `janela_dias`, normalizada
+    pela media geral. Indice 1.0 = dia tipico; 1.3 = 30% acima da media.
+    Mesmo metodo da planilha de metas de referencia do time ("Índices por
+    dia da semana calculados sobre os dias com dado verificado")."""
     limite = pd.Timestamp(date.today() - timedelta(days=janela_dias))
     hist = pedidos_hist[pedidos_hist["data_pedido_dt"] >= limite]
     if hist.empty:
         return {i: 1.0 for i in range(7)}
 
-    por_data = hist.groupby(hist["data_pedido_dt"].dt.date)["receita"].sum()
+    por_data = hist.groupby(hist["data_pedido_dt"].dt.date)["valor_venda_efetivo"].sum()
     por_data.index = pd.to_datetime(por_data.index)
     media_por_dia_semana = por_data.groupby(por_data.index.dayofweek).mean()
     media_geral = media_por_dia_semana.mean()
@@ -182,6 +196,16 @@ def calcular_indices_dia_semana(pedidos_hist: pd.DataFrame, janela_dias: int = 9
 
     indices = (media_por_dia_semana / media_geral).to_dict()
     return {i: indices.get(i, 1.0) for i in range(7)}
+
+
+def calcular_indices_por_canal(pedidos_hist: pd.DataFrame, canais: list[str], janela_dias: int = 90) -> dict[str, dict[int, float]]:
+    """Sazonalidade calculada SEPARADAMENTE por canal - cada marketplace tem
+    seu proprio padrao de dia da semana (ex.: Shopee pode ter pico em dia de
+    campanha diferente do Mercado Livre)."""
+    return {
+        canal: calcular_indices_dia_semana(pedidos_hist[pedidos_hist["canal"] == canal], janela_dias)
+        for canal in canais
+    }
 
 
 def _dias_do_mes(mes: date) -> list[date]:
@@ -202,41 +226,43 @@ def _meses_no_intervalo(data_inicio: date, data_fim: date) -> list[date]:
 
 
 def calcular_meta_periodo(
-    data_inicio: date, data_fim: date, metas_por_mes: dict, indices: dict[int, float]
+    data_inicio: date, data_fim: date, metas_por_mes: dict, indices_por_canal: dict
 ) -> tuple[float, float, bool]:
-    """Reparte a meta MENSAL pelos dias do periodo pedido, proporcional ao
-    indice de sazonalidade de cada dia da semana. Retorna
-    (meta_faturamento, meta_margem_r$, tem_mes_sem_meta_cadastrada)."""
+    """Soma a meta de TODOS os canais, cada um repartido pelos dias do
+    periodo pedido proporcional ao indice de sazonalidade proprio daquele
+    canal. Retorna (meta_faturamento, meta_margem_r$, tem_mes_sem_meta)."""
     total_fat = 0.0
     total_margem = 0.0
     faltando = False
     for mes in _meses_no_intervalo(data_inicio, data_fim):
-        meta_mes = metas_por_mes.get(mes)
-        if not meta_mes:
+        metas_canais = metas_por_mes.get(mes)
+        if not metas_canais:
             faltando = True
             continue
         dias_mes = _dias_do_mes(mes)
-        soma_pesos_mes = sum(indices[d.weekday()] for d in dias_mes)
-        if not soma_pesos_mes:
-            continue
-        for d in dias_mes:
-            if data_inicio <= d <= data_fim:
-                peso_dia = indices[d.weekday()] / soma_pesos_mes
-                meta_dia_fat = meta_mes["meta_faturamento"] * peso_dia
-                total_fat += meta_dia_fat
-                total_margem += meta_dia_fat * meta_mes["meta_margem_pct"] / 100
+        for canal, meta_canal in metas_canais.items():
+            indices_canal = indices_por_canal.get(canal) or {i: 1.0 for i in range(7)}
+            soma_pesos_mes = sum(indices_canal[d.weekday()] for d in dias_mes)
+            if not soma_pesos_mes:
+                continue
+            for d in dias_mes:
+                if data_inicio <= d <= data_fim:
+                    peso_dia = indices_canal[d.weekday()] / soma_pesos_mes
+                    meta_dia_fat = (meta_canal.get("meta_faturamento") or 0.0) * peso_dia
+                    total_fat += meta_dia_fat
+                    total_margem += meta_dia_fat * (meta_canal.get("meta_margem_pct") or 0.0) / 100
     return round(total_fat, 2), round(total_margem, 2), faltando
 
 
 def calcular_projecao_mes(
-    pedidos_hist: pd.DataFrame, mes: date, meta_mes: dict | None, indices: dict[int, float]
+    pedidos_hist: pd.DataFrame, mes: date, metas_canais: dict | None, indices_por_canal: dict
 ) -> tuple[float | None, float | None]:
     """Projeta o faturamento do MES INTEIRO (nao so o periodo filtrado na
-    sidebar) a partir do ritmo real ate hoje: calcula quanto cada "unidade
-    de peso de sazonalidade" valeu em R$ nos dias ja passados do mes, e
-    aplica esse mesmo valor aos dias que ainda faltam. Retorna
-    (projecao_r$, pct_da_meta) - qualquer um pode vir None se nao houver
-    dado/meta suficiente pra calcular."""
+    sidebar), canal por canal: calcula quanto cada "unidade de peso de
+    sazonalidade" daquele canal valeu em R$ nos dias ja passados do mes, e
+    aplica esse mesmo valor aos dias que faltam - depois soma todos os
+    canais. Retorna (projecao_r$, pct_da_meta) - qualquer um pode vir None
+    se nao houver dado/meta suficiente."""
     hoje = date.today()
     dias_mes = _dias_do_mes(mes)
     dias_passados = [d for d in dias_mes if d <= hoje]
@@ -244,24 +270,133 @@ def calcular_projecao_mes(
     if not dias_passados:
         return None, None
 
-    receita_mes_ate_agora = pedidos_hist[
+    pedidos_mes = pedidos_hist[
         (pedidos_hist["data_pedido_dt"].dt.date >= dias_mes[0])
         & (pedidos_hist["data_pedido_dt"].dt.date <= min(hoje, dias_mes[-1]))
-    ]["receita"].sum()
-
-    soma_pesos_passados = sum(indices[d.weekday()] for d in dias_passados)
-    soma_pesos_futuros = sum(indices[d.weekday()] for d in dias_futuros)
-    if not soma_pesos_passados:
+    ]
+    if pedidos_mes.empty:
         return None, None
 
-    valor_por_peso = receita_mes_ate_agora / soma_pesos_passados
-    projecao = receita_mes_ate_agora + valor_por_peso * soma_pesos_futuros
+    projecao_total = 0.0
+    for canal, grupo in pedidos_mes.groupby("canal"):
+        indices_canal = indices_por_canal.get(canal) or {i: 1.0 for i in range(7)}
+        soma_pesos_passados = sum(indices_canal[d.weekday()] for d in dias_passados)
+        soma_pesos_futuros = sum(indices_canal[d.weekday()] for d in dias_futuros)
+        if not soma_pesos_passados:
+            continue
+        realizado_canal = grupo["valor_venda_efetivo"].sum()
+        valor_por_peso = realizado_canal / soma_pesos_passados
+        projecao_total += realizado_canal + valor_por_peso * soma_pesos_futuros
 
     pct_meta = None
-    if meta_mes and meta_mes.get("meta_faturamento"):
-        pct_meta = round(projecao / meta_mes["meta_faturamento"] * 100, 1)
+    if metas_canais:
+        meta_total = sum(m.get("meta_faturamento") or 0.0 for m in metas_canais.values())
+        if meta_total:
+            pct_meta = round(projecao_total / meta_total * 100, 1)
 
-    return round(projecao, 2), pct_meta
+    return round(projecao_total, 2), pct_meta
+
+
+_DIAS_SEMANA_PT = [
+    "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+    "sexta-feira", "sábado", "domingo",
+]
+
+
+def montar_relatorio_diario(
+    pedidos_hist: pd.DataFrame, mes: date, metas_canais: dict, indices_por_canal: dict, canais_ordem: list[str]
+) -> pd.DataFrame:
+    """Reconstroi a planilha de metas diaria (1 linha por dia+canal, mais
+    uma linha de total do dia) 100% a partir do Supabase - substitui o
+    preenchimento manual de Realizado/Pedidos/Tkmedio/Gap/Acumulados."""
+    dias_mes = _dias_do_mes(mes)
+    hoje = date.today()
+    pedidos_mes = pedidos_hist[
+        (pedidos_hist["data_pedido_dt"].dt.date >= dias_mes[0]) & (pedidos_hist["data_pedido_dt"].dt.date <= dias_mes[-1])
+    ]
+
+    # Projecao do mes inteiro por canal (um valor so, repetido em todas as
+    # linhas daquele canal - nao recalcula "como estava visto daquele dia",
+    # so o que da pra saber HOJE).
+    projecao_por_canal: dict[str, float] = {}
+    for canal in canais_ordem:
+        proj, _ = calcular_projecao_mes(pedidos_hist, mes, {canal: metas_canais[canal]} if canal in metas_canais else None, indices_por_canal)
+        projecao_por_canal[canal] = proj
+
+    linhas = []
+    acumulado = {canal: {"meta": 0.0, "hiper": 0.0, "realizado": 0.0} for canal in canais_ordem}
+
+    for i, dia in enumerate(dias_mes, start=1):
+        pedidos_dia = pedidos_mes[pedidos_mes["data_pedido_dt"].dt.date == dia]
+        tot = {"meta": 0.0, "hiper": 0.0, "realizado": 0.0, "pedidos": 0}
+
+        for canal in canais_ordem:
+            meta_canal = metas_canais.get(canal, {})
+            indices_canal = indices_por_canal.get(canal) or {i: 1.0 for i in range(7)}
+            soma_pesos_mes = sum(indices_canal[d.weekday()] for d in dias_mes) or 1.0
+            peso_dia = indices_canal[dia.weekday()] / soma_pesos_mes
+
+            meta_dia = (meta_canal.get("meta_faturamento") or 0.0) * peso_dia
+            hiper_dia = (meta_canal.get("hiper_meta_faturamento") or 0.0) * peso_dia
+
+            pedidos_canal_dia = pedidos_dia[pedidos_dia["canal"] == canal]
+            realizado_dia = pedidos_canal_dia["valor_venda_efetivo"].sum()
+            n_pedidos = len(pedidos_canal_dia)
+
+            acumulado[canal]["meta"] += meta_dia
+            acumulado[canal]["hiper"] += hiper_dia
+            if dia <= hoje:
+                acumulado[canal]["realizado"] += realizado_dia
+
+            linhas.append(
+                {
+                    "dia": i,
+                    "data": dia.strftime("%d/%m"),
+                    "dia_semana": _DIAS_SEMANA_PT[dia.weekday()],
+                    "canal": canal,
+                    "meta": round(meta_dia, 2),
+                    "hiper_meta": round(hiper_dia, 2),
+                    "realizado": round(realizado_dia, 2) if dia <= hoje else None,
+                    "gap": round(realizado_dia - meta_dia, 2) if dia <= hoje else None,
+                    "pedidos": n_pedidos if dia <= hoje else None,
+                    "tkmedio": round(realizado_dia / n_pedidos, 2) if (dia <= hoje and n_pedidos) else None,
+                    "projeção": round(projecao_por_canal.get(canal), 2) if projecao_por_canal.get(canal) is not None else None,
+                    "gap_acumulado": round(acumulado[canal]["realizado"] - acumulado[canal]["meta"], 2) if dia <= hoje else None,
+                    "acumulado_meta": round(acumulado[canal]["meta"], 2),
+                    "acumulado_hiper_meta": round(acumulado[canal]["hiper"], 2),
+                    "acumulado_realizado": round(acumulado[canal]["realizado"], 2) if dia <= hoje else None,
+                }
+            )
+
+            tot["meta"] += meta_dia
+            tot["hiper"] += hiper_dia
+            tot["realizado"] += realizado_dia
+            tot["pedidos"] += n_pedidos
+
+        acumulado_meta_total = sum(a["meta"] for a in acumulado.values())
+        acumulado_hiper_total = sum(a["hiper"] for a in acumulado.values())
+        acumulado_realizado_total = sum(a["realizado"] for a in acumulado.values())
+        linhas.append(
+            {
+                "dia": i,
+                "data": dia.strftime("%d/%m"),
+                "dia_semana": _DIAS_SEMANA_PT[dia.weekday()],
+                "canal": "TOTAL DO DIA",
+                "meta": round(tot["meta"], 2),
+                "hiper_meta": round(tot["hiper"], 2),
+                "realizado": round(tot["realizado"], 2) if dia <= hoje else None,
+                "gap": round(tot["realizado"] - tot["meta"], 2) if dia <= hoje else None,
+                "pedidos": tot["pedidos"] if dia <= hoje else None,
+                "tkmedio": round(tot["realizado"] / tot["pedidos"], 2) if (dia <= hoje and tot["pedidos"]) else None,
+                "projeção": round(sum(v for v in projecao_por_canal.values() if v is not None), 2),
+                "gap_acumulado": round(acumulado_realizado_total - acumulado_meta_total, 2) if dia <= hoje else None,
+                "acumulado_meta": round(acumulado_meta_total, 2),
+                "acumulado_hiper_meta": round(acumulado_hiper_total, 2),
+                "acumulado_realizado": round(acumulado_realizado_total, 2) if dia <= hoje else None,
+            }
+        )
+
+    return pd.DataFrame(linhas)
 
 
 st.title("📊 Margem de contribuição — Grupo Amo")
@@ -279,6 +414,15 @@ if pedidos.empty:
 
 pedidos["data_pedido_dt"] = pd.to_datetime(pedidos["data_pedido"], format="%d/%m/%Y", errors="coerce")
 itens["data_pedido_dt"] = pd.to_datetime(itens["data_pedido"], format="%d/%m/%Y", errors="coerce")
+
+# valor_venda (bruto) e a base certa pra comparar com "Realizado" de
+# relatorios externos - confirmado comparando pedido a pedido contra a
+# planilha de metas do time (2026-09-19): receita liquida so bate pros
+# canais que nao sao Mercado Livre. Pedidos antigos sem valor_venda gravado
+# caem pra receita (aproximacao - ver dashboard, aba Vendas).
+if "valor_venda" not in pedidos.columns:
+    pedidos["valor_venda"] = None
+pedidos["valor_venda_efetivo"] = pedidos["valor_venda"].fillna(pedidos["receita"])
 
 # ----------------------------------------------------------------------
 # Filtros (sidebar)
@@ -359,52 +503,66 @@ if pedidos_f.empty:
 # Abas
 # ----------------------------------------------------------------------
 
-aba_visao, aba_produtos, aba_custos, aba_vendas = st.tabs(
-    ["📈 Visão geral", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas"]
+aba_visao, aba_metas, aba_produtos, aba_custos, aba_vendas = st.tabs(
+    ["📈 Visão geral", "📅 Metas diárias", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas"]
 )
+
+canais_todos = sorted(pedidos["canal"].dropna().unique())
 
 # ---- Visão geral -------------------------------------------------------
 with aba_visao:
-    # -- Meta do mes: cadastro + comparativo com o realizado --------------
+    # -- Meta do mes: cadastro (por canal) + comparativo com o realizado --
     try:
         metas_por_mes = carregar_metas()
     except Exception:
         metas_por_mes = {}
 
-    with st.expander("🎯 Meta do mês (faturamento + margem)"):
+    with st.expander("🎯 Meta do mês (por canal, faturamento + margem)"):
         mes_config = st.date_input(
-            "Configurar meta de qual mês?", value=date.today().replace(day=1), format="DD/MM/YYYY"
+            "Configurar meta de qual mês?", value=date.today().replace(day=1), format="DD/MM/YYYY", key="mes_config_visao"
         ).replace(day=1)
-        meta_existente = metas_por_mes.get(mes_config, {})
-        col_a, col_b = st.columns(2)
-        novo_fat = col_a.number_input(
-            "Meta de faturamento do mês (R$)",
-            min_value=0.0,
-            step=1000.0,
-            value=float(meta_existente.get("meta_faturamento", 0.0)),
-        )
-        novo_pct = col_b.number_input(
-            "Meta de margem (%)",
-            min_value=0.0,
-            max_value=100.0,
-            step=0.5,
-            value=float(meta_existente.get("meta_margem_pct", 15.0)),
+        metas_existentes = metas_por_mes.get(mes_config, {})
+
+        tabela_metas = pd.DataFrame(
+            [
+                {
+                    "canal": canal,
+                    "meta_faturamento": float(metas_existentes.get(canal, {}).get("meta_faturamento") or 0.0),
+                    "hiper_meta_faturamento": float(metas_existentes.get(canal, {}).get("hiper_meta_faturamento") or 0.0),
+                    "meta_margem_pct": float(metas_existentes.get(canal, {}).get("meta_margem_pct") or 15.0),
+                }
+                for canal in canais_todos
+            ]
         )
         st.caption(
-            "A meta é sempre do MÊS inteiro - a divisão por dia é automática, "
-            "proporcional a como cada dia da semana costuma vender (últimos 90 dias)."
+            "Meta por canal é decisão do time (ex.: crescer um marketplace de propósito) - a divisão por "
+            "DIA dentro do mês é automática, proporcional a como cada canal costuma vender por dia da "
+            "semana (últimos 90 dias)."
         )
-        if st.button("💾 Salvar meta"):
+        metas_editadas = st.data_editor(
+            tabela_metas,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "canal": st.column_config.TextColumn("Canal", disabled=True),
+                "meta_faturamento": st.column_config.NumberColumn("Meta (R$)", min_value=0.0, step=100.0),
+                "hiper_meta_faturamento": st.column_config.NumberColumn("Hiper Meta (R$)", min_value=0.0, step=100.0),
+                "meta_margem_pct": st.column_config.NumberColumn("Meta de margem (%)", min_value=0.0, max_value=100.0, step=0.5),
+            },
+            key="editor_metas_visao",
+        )
+        if st.button("💾 Salvar metas do mês"):
             try:
-                salvar_meta(mes_config, novo_fat, novo_pct)
-                st.success(f"Meta de {mes_config.strftime('%m/%Y')} salva.")
+                registros = metas_editadas.to_dict("records")
+                salvar_metas_canal(mes_config, registros)
+                st.success(f"Metas de {mes_config.strftime('%m/%Y')} salvas ({len(registros)} canal(is)).")
                 st.rerun()
             except Exception as e:
                 st.error(f"Falha ao salvar: {e}")
 
-    indices_dia_semana = calcular_indices_dia_semana(pedidos)
+    indices_por_canal = calcular_indices_por_canal(pedidos, canais_todos)
     meta_fat_periodo, meta_margem_periodo, meta_incompleta = calcular_meta_periodo(
-        data_inicio, data_fim, metas_por_mes, indices_dia_semana
+        data_inicio, data_fim, metas_por_mes, indices_por_canal
     )
     # Faturamento/margem real do periodo SEMPRE de todas as contas/canais
     # (a meta e um numero unico da empresa toda - nao faz sentido comparar
@@ -412,7 +570,7 @@ with aba_visao:
     pedidos_periodo_empresa = pedidos[
         (pedidos["data_pedido_dt"].dt.date >= data_inicio) & (pedidos["data_pedido_dt"].dt.date <= data_fim)
     ]
-    faturamento_real = pedidos_periodo_empresa["receita"].sum()
+    faturamento_real = pedidos_periodo_empresa["valor_venda_efetivo"].sum()
     margem_real = pedidos_periodo_empresa["margem_contribuicao"].sum()
 
     itens_com_custo = itens_f[itens_f["custo_ausente"] == False]  # noqa: E712
@@ -441,7 +599,7 @@ with aba_visao:
 
         mes_corrente = date.today().replace(day=1)
         projecao_mes, pct_projecao_meta = calcular_projecao_mes(
-            pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_dia_semana
+            pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_por_canal
         )
         cp1, cp2 = st.columns(2)
         cp1.metric(
@@ -581,6 +739,60 @@ with aba_visao:
     por_conta = por_conta.sort_values("margem", ascending=False)
     st.bar_chart(por_conta.set_index("conta_tiny")["margem"])
     st.dataframe(por_conta, hide_index=True, use_container_width=True)
+
+# ---- Metas diárias --------------------------------------------------------
+with aba_metas:
+    st.caption(
+        "Recria a planilha de metas diária automaticamente a partir do Supabase - Realizado, Pedidos, "
+        "Tkmedio, Gap, Projeção e Acumulados não precisam mais ser preenchidos à mão todo dia. "
+        "Só a Meta e a Hiper Meta de cada canal são cadastradas (aba Visão geral), 1 vez por mês."
+    )
+    mes_relatorio = st.date_input(
+        "Mês do relatório", value=date.today().replace(day=1), format="DD/MM/YYYY", key="mes_relatorio_diario"
+    ).replace(day=1)
+
+    metas_mes_relatorio = metas_por_mes.get(mes_relatorio, {})
+    if not metas_mes_relatorio:
+        st.warning(
+            f"Nenhuma meta cadastrada pra {mes_relatorio.strftime('%m/%Y')} ainda - cadastre na aba "
+            "'Visão geral' (expander 'Meta do mês'). O relatório abaixo funciona mesmo sem meta "
+            "(fica só com Realizado/Pedidos/Tkmedio), mas Meta/Gap/Projeção ficam zerados."
+        )
+
+    relatorio = montar_relatorio_diario(pedidos, mes_relatorio, metas_mes_relatorio, indices_por_canal, canais_todos)
+
+    st.dataframe(
+        relatorio,
+        hide_index=True,
+        use_container_width=True,
+        height=600,
+        column_config={
+            "dia": st.column_config.NumberColumn("//"),
+            "data": "Data",
+            "dia_semana": "Dia/Semana",
+            "canal": "Marketplace",
+            "meta": st.column_config.NumberColumn("Meta", format="R$ %.2f"),
+            "hiper_meta": st.column_config.NumberColumn("Hiper Meta", format="R$ %.2f"),
+            "realizado": st.column_config.NumberColumn("Realizado", format="R$ %.2f"),
+            "gap": st.column_config.NumberColumn("Gap", format="R$ %.2f"),
+            "pedidos": st.column_config.NumberColumn("Pedidos"),
+            "tkmedio": st.column_config.NumberColumn("Tkmédio", format="R$ %.2f"),
+            "projeção": st.column_config.NumberColumn("Projeção", format="R$ %.2f"),
+            "gap_acumulado": st.column_config.NumberColumn("Gap Acumulado", format="R$ %.2f"),
+            "acumulado_meta": st.column_config.NumberColumn("Acumulado Meta", format="R$ %.2f"),
+            "acumulado_hiper_meta": st.column_config.NumberColumn("Acumulado Hiper Meta", format="R$ %.2f"),
+            "acumulado_realizado": st.column_config.NumberColumn("Acumulado Realizado", format="R$ %.2f"),
+        },
+    )
+
+    buffer_relatorio = io.BytesIO()
+    relatorio.to_excel(buffer_relatorio, index=False, sheet_name=mes_relatorio.strftime("%B %Y"))
+    st.download_button(
+        "⬇️ Baixar relatório (Excel)",
+        buffer_relatorio.getvalue(),
+        f"metas_{mes_relatorio.strftime('%Y_%m')}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 # ---- Produtos -----------------------------------------------------------
 with aba_produtos:
