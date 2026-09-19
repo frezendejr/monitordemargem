@@ -171,6 +171,44 @@ def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, tit
     return base.mark_arc(outerRadius=110)
 
 
+def _injetar_css_kpi():
+    """CSS dos cartoes de indicador (._kpi_card) - verde quando o numero e
+    bom, vermelho piscando quando e ruim (mesmo padrao visual do alerta de
+    "vendas abaixo do custo", so que com uma keyframe propria pra nao
+    depender daquele bloco só existir quando ha alerta)."""
+    st.markdown(
+        """
+        <style>
+        .kpi-card {
+            border-radius: 10px; padding: 14px 16px; margin-bottom: 8px;
+            border: 1px solid rgba(49, 51, 63, 0.1); height: 100%;
+        }
+        .kpi-title { font-size: 0.80rem; font-weight: 600; opacity: 0.75; margin-bottom: 4px; }
+        .kpi-value { font-size: 1.65rem; font-weight: 700; line-height: 1.15; }
+        .kpi-sub { font-size: 0.78rem; margin-top: 4px; opacity: 0.9; }
+        .kpi-neutral { background-color: rgba(120, 130, 140, 0.08); }
+        .kpi-green { background-color: rgba(30, 126, 52, 0.12); }
+        .kpi-green .kpi-value, .kpi-green .kpi-sub { color: #1e7e34; }
+        .kpi-red-blink { background-color: rgba(211, 47, 47, 0.12); animation: kpi_piscar 1.1s infinite; }
+        .kpi-red-blink .kpi-value, .kpi-red-blink .kpi-sub { color: #c62828; }
+        @keyframes kpi_piscar { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _kpi_card(titulo: str, valor: str, status: str = "neutral", sub: str | None = None):
+    """status: 'green' (bom/positivo) | 'red' (ruim/negativo, pisca) | 'neutral' (informativo)."""
+    classe = {"green": "kpi-green", "red": "kpi-red-blink", "neutral": "kpi-neutral"}[status]
+    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    st.markdown(
+        f'<div class="kpi-card {classe}"><div class="kpi-title">{titulo}</div>'
+        f'<div class="kpi-value">{valor}</div>{sub_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # ----------------------------------------------------------------------
 # Metas (faturamento/margem POR MES E POR CANAL - a mistura entre canais e
 # uma decisao estrategica do time, ex.: "crescer Amazon, manter Shoppe 1",
@@ -323,14 +361,24 @@ def calcular_meta_periodo(
 
 
 def calcular_projecao_mes(
-    pedidos_hist: pd.DataFrame, mes: date, metas_canais: dict | None, indices_por_canal: dict
+    pedidos_hist: pd.DataFrame,
+    mes: date,
+    metas_canais: dict | None,
+    indices_por_canal: dict,
+    campo: str = "valor_venda_efetivo",
+    campo_meta: str = "meta_faturamento",
 ) -> tuple[float | None, float | None]:
-    """Projeta o faturamento do MES INTEIRO (nao so o periodo filtrado na
-    sidebar), canal por canal: calcula quanto cada "unidade de peso de
-    sazonalidade" daquele canal valeu em R$ nos dias ja passados do mes, e
-    aplica esse mesmo valor aos dias que faltam - depois soma todos os
-    canais. Retorna (projecao_r$, pct_da_meta) - qualquer um pode vir None
-    se nao houver dado/meta suficiente."""
+    """Projeta o MES INTEIRO (nao so o periodo filtrado na sidebar) pra
+    qualquer coluna numerica de `pedidos_hist` (faturamento via
+    "valor_venda_efetivo", margem via "margem_contribuicao"), canal por
+    canal: calcula quanto cada "unidade de peso de sazonalidade" daquele
+    canal valeu em R$ nos dias ja passados do mes, e aplica esse mesmo valor
+    aos dias que faltam - depois soma todos os canais. `campo_meta` escolhe
+    a meta de comparacao: "meta_faturamento"/"hiper_meta_faturamento" (ja
+    e um valor em R$) ou "meta_margem_valor" (derivado aqui como
+    meta_faturamento * meta_margem_pct / 100, ja que o cadastro so guarda a
+    margem em %, nao em R$). Retorna (projecao_r$, pct_da_meta) - qualquer
+    um pode vir None se nao houver dado/meta suficiente."""
     hoje = date.today()
     dias_mes = _dias_do_mes(mes)
     dias_passados = [d for d in dias_mes if d <= hoje]
@@ -352,13 +400,19 @@ def calcular_projecao_mes(
         soma_pesos_futuros = sum(indices_canal[d.weekday()] for d in dias_futuros)
         if not soma_pesos_passados:
             continue
-        realizado_canal = grupo["valor_venda_efetivo"].sum()
+        realizado_canal = grupo[campo].sum()
         valor_por_peso = realizado_canal / soma_pesos_passados
         projecao_total += realizado_canal + valor_por_peso * soma_pesos_futuros
 
     pct_meta = None
     if metas_canais:
-        meta_total = sum(m.get("meta_faturamento") or 0.0 for m in metas_canais.values())
+        if campo_meta == "meta_margem_valor":
+            meta_total = sum(
+                (m.get("meta_faturamento") or 0.0) * (m.get("meta_margem_pct") or 0.0) / 100
+                for m in metas_canais.values()
+            )
+        else:
+            meta_total = sum(m.get(campo_meta) or 0.0 for m in metas_canais.values())
         if meta_total:
             pct_meta = round(projecao_total / meta_total * 100, 1)
 
@@ -671,51 +725,85 @@ with aba_visao:
     margem_com_custo = itens_com_custo["margem_contribuicao"].sum()
     margem_pct_media = (margem_com_custo / receita_com_custo * 100) if receita_com_custo else 0
 
+    _injetar_css_kpi()
+
+    mes_corrente = date.today().replace(day=1)
+    projecao_fat_mes, pct_projecao_fat_meta = calcular_projecao_mes(
+        pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_por_canal,
+        campo="valor_venda_efetivo", campo_meta="meta_faturamento",
+    )
+    projecao_margem_mes, pct_projecao_margem_meta = calcular_projecao_mes(
+        pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_por_canal,
+        campo="margem_contribuicao", campo_meta="meta_margem_valor",
+    )
+
     with st.container(border=True):
-        st.caption("Faturamento e margem (com meta) SEMPRE somam todas as contas/canais, independente do filtro ao lado.")
-        cm1, cm2 = st.columns(2)
-        cm1.metric("Faturamento", _fmt_moeda(faturamento_real))
-        cm2.metric(
-            "Meta de Faturamento",
-            _fmt_moeda(meta_fat_periodo) if not meta_incompleta else "sem meta",
-            delta=(f"{(faturamento_real / meta_fat_periodo * 100 - 100):+.1f}%" if meta_fat_periodo else None),
-        )
-        cm3, cm4 = st.columns(2)
-        cm3.metric("Margem", _fmt_moeda(margem_real))
-        cm4.metric(
-            "Meta de Margem",
-            _fmt_moeda(meta_margem_periodo) if not meta_incompleta else "sem meta",
-            delta=(f"{(margem_real / meta_margem_periodo * 100 - 100):+.1f}%" if meta_margem_periodo else None),
-        )
+        st.caption("Faturamento e margem (com meta e projeção) SEMPRE somam todas as contas/canais, independente do filtro ao lado.")
+
+        cm1, cm2, cm3, cm4 = st.columns(4)
+        with cm1:
+            _kpi_card("💰 Faturamento", _fmt_moeda(faturamento_real), "neutral")
+        with cm2:
+            pct_fat = (faturamento_real / meta_fat_periodo * 100) if meta_fat_periodo else None
+            _kpi_card(
+                "🎯 Meta de Faturamento",
+                _fmt_moeda(meta_fat_periodo) if not meta_incompleta else "sem meta",
+                "neutral",
+                sub=(f"{pct_fat - 100:+.1f}% da meta" if pct_fat is not None else None),
+            )
+        with cm3:
+            _kpi_card("📊 Margem", _fmt_moeda(margem_real), "green" if margem_real >= 0 else "red")
+        with cm4:
+            pct_margem = (margem_real / meta_margem_periodo * 100) if meta_margem_periodo else None
+            _kpi_card(
+                "🎯 Meta de Margem",
+                _fmt_moeda(meta_margem_periodo) if not meta_incompleta else "sem meta",
+                "neutral",
+                sub=(f"{pct_margem - 100:+.1f}% da meta" if pct_margem is not None else None),
+            )
         if meta_incompleta:
             st.caption("⚠️ Algum mês do período selecionado ainda não tem meta cadastrada acima.")
 
-        mes_corrente = date.today().replace(day=1)
-        projecao_mes, pct_projecao_meta = calcular_projecao_mes(
-            pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_por_canal
-        )
-        cp1, cp2 = st.columns(2)
-        cp1.metric(
-            f"Projeção de Faturamento ({mes_corrente.strftime('%m/%Y')})",
-            _fmt_moeda(projecao_mes) if projecao_mes is not None else "sem dado suficiente",
-        )
-        cp2.metric(
-            "% da Meta (projeção)",
-            f"{pct_projecao_meta:.1f}%" if pct_projecao_meta is not None else "sem meta",
-            delta=(f"{pct_projecao_meta - 100:+.1f}pp" if pct_projecao_meta is not None else None),
-        )
+        cp1, cp2, cp3, cp4 = st.columns(4)
+        status_fat_proj = "green" if (pct_projecao_fat_meta is None and (projecao_fat_mes or 0) >= 0) or (pct_projecao_fat_meta is not None and pct_projecao_fat_meta >= 100) else "red"
+        with cp1:
+            _kpi_card(
+                f"📈 Projeção Faturamento ({mes_corrente.strftime('%m/%Y')})",
+                _fmt_moeda(projecao_fat_mes) if projecao_fat_mes is not None else "sem dado suficiente",
+                status_fat_proj if projecao_fat_mes is not None else "neutral",
+            )
+        with cp2:
+            _kpi_card(
+                "% da Meta (projeção fat.)",
+                f"{pct_projecao_fat_meta:.1f}%" if pct_projecao_fat_meta is not None else "sem meta",
+                status_fat_proj if pct_projecao_fat_meta is not None else "neutral",
+                sub=(f"{pct_projecao_fat_meta - 100:+.1f}pp" if pct_projecao_fat_meta is not None else None),
+            )
+        status_margem_proj = "green" if (pct_projecao_margem_meta is None and (projecao_margem_mes or 0) >= 0) or (pct_projecao_margem_meta is not None and pct_projecao_margem_meta >= 100) else "red"
+        with cp3:
+            _kpi_card(
+                f"📈 Projeção Margem ({mes_corrente.strftime('%m/%Y')})",
+                _fmt_moeda(projecao_margem_mes) if projecao_margem_mes is not None else "sem dado suficiente",
+                status_margem_proj if projecao_margem_mes is not None else "neutral",
+            )
+        with cp4:
+            _kpi_card(
+                "% da Meta (projeção margem)",
+                f"{pct_projecao_margem_meta:.1f}%" if pct_projecao_margem_meta is not None else "sem meta",
+                status_margem_proj if pct_projecao_margem_meta is not None else "neutral",
+                sub=(f"{pct_projecao_margem_meta - 100:+.1f}pp" if pct_projecao_margem_meta is not None else None),
+            )
         st.caption(
-            "Projeção sempre do MÊS CORRENTE inteiro (independente do período filtrado ao lado): "
-            "pega o ritmo real de venda por dia da semana já observado este mês e extrapola pros dias que faltam."
+            "Projeção sempre do MÊS CORRENTE inteiro (independente do período filtrado ao lado): pega o ritmo real "
+            "de venda/margem por dia da semana já observado este mês e extrapola pros dias que faltam. "
+            "🟢 verde = na meta (ou positivo, se ainda sem meta cadastrada) · 🔴 vermelho piscando = abaixo da meta (ou negativo)."
         )
 
         st.divider()
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Pedidos", f"{len(pedidos_f):,}".replace(",", "."))
         c2.metric("Receita total", _fmt_moeda(pedidos_f["receita"].sum()))
-
-        c3, c4 = st.columns(2)
         c3.metric("Margem total", _fmt_moeda(pedidos_f["margem_contribuicao"].sum()))
         c4.metric("Margem % (só c/ custo)", f"{margem_pct_media:.1f}%")
 
