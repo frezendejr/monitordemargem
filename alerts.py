@@ -137,12 +137,16 @@ def enviar_email(assunto: str, corpo: str, config: dict) -> None:
     if not destinatarios:
         return
 
-    try:
-        host = os.environ["SMTP_HOST"]
-        usuario = os.environ["SMTP_USER"]
-        senha = os.environ["SMTP_PASSWORD"]
-    except KeyError as e:
-        logger.error("E-mail ativo=true no config mas falta credencial %s no .env - alerta nao enviado", e)
+    host = os.environ.get("SMTP_HOST", "")
+    usuario = os.environ.get("SMTP_USER", "")
+    senha = os.environ.get("SMTP_PASSWORD", "")
+    if not host or not usuario or not senha:
+        # Antes so pegava KeyError (variavel ausente) - mas SMTP_HOST/USER/
+        # PASSWORD existem no .env como string vazia (SMTP ainda nao
+        # configurado), entao passava direto pro smtplib.SMTP("", ...) e
+        # falhava la dentro com um traceback confuso
+        # (SMTPServerDisconnected: please run connect() first) a cada alerta.
+        logger.error("E-mail ativo=true no config mas SMTP_HOST/USER/PASSWORD nao preenchidos no .env - alerta nao enviado")
         return
 
     port = int(os.environ.get("SMTP_PORT", 587))

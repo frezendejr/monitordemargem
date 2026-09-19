@@ -67,7 +67,12 @@ def _resolver_receita_e_config(pedido_completo, canal, canal_config, ml_clientes
         receita = float(pedido_completo.get("total_pedido", 0) or 0)
         return receita, canal_config
 
-    canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0)
+    # faixas_frete tem prioridade sobre frete_pct em _percentual_frete - zerar
+    # so o frete_pct nao bastava pro canal meli_conta_1 (usa faixas_frete),
+    # entao o frete estimado continuava sendo descontado EM CIMA da receita
+    # que ja vem liquida de frete real (bug real: confirmado contra a venda
+    # 2000018537926936 em 2026-09-19, R$26,32 de frete cobrado em dobro).
+    canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0, faixas_frete=None)
     return receita_exata, canal_config_exato
 
 
@@ -79,7 +84,14 @@ def processar_conta(conta_tiny: str, cliente: TinyClient, canais_config: dict, c
 
     try:
         pedidos_resumo = cliente.buscar_pedidos_atualizados_desde(desde)
-    except TinyApiError:
+    except Exception:
+        # Antes so pegava TinyApiError - mas um erro HTTP (resp.raise_for_status())
+        # ou uma resposta que nao e JSON valido (resp.json()) sobe como
+        # requests.HTTPError/JSONDecodeError, nao TinyApiError, e nao era pego
+        # aqui. Isso derrubava o main() inteiro (todas as 4 contas) por causa
+        # de UMA conta - confirmado como a causa provavel do monitor ficar
+        # parado no GitHub Actions em 2026-09-19 (falha rapida, ~24s, tipica
+        # de crash logo no inicio do ciclo, antes de processar qualquer coisa).
         logger.exception("[%s] Falha ao buscar pedidos atualizados no Tiny", conta_tiny)
         return 0
 
@@ -170,7 +182,13 @@ def main():
             continue
 
         cliente = TinyClient(token)
-        total += processar_conta(conta_tiny, cliente, conta_cfg["canais"], config, custos)
+        try:
+            total += processar_conta(conta_tiny, cliente, conta_cfg["canais"], config, custos)
+        except Exception:
+            # Rede de seguranca extra: qualquer erro nao previsto numa conta
+            # (aqui ou dentro de processar_conta) nunca pode impedir as
+            # outras 3 contas de rodar no mesmo ciclo.
+            logger.exception("[%s] Erro inesperado processando a conta - pulando pro proximo ciclo", conta_tiny)
 
     logger.info("Ciclo concluido: %d pedido(s) processado(s) no total", total)
 

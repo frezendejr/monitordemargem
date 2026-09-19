@@ -83,7 +83,12 @@ def _resolver_receita_e_config(
         receita = float(pedido_completo.get("total_pedido", 0) or 0)
         return receita, canal_config
 
-    canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0)
+    # faixas_frete tem prioridade sobre frete_pct em _percentual_frete - zerar
+    # so o frete_pct nao bastava pro canal meli_conta_1 (usa faixas_frete),
+    # entao o frete estimado continuava sendo descontado EM CIMA da receita
+    # que ja vem liquida de frete real (bug real: confirmado contra a venda
+    # 2000018537926936 em 2026-09-19, R$26,32 de frete cobrado em dobro).
+    canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0, faixas_frete=None)
     return receita_exata, canal_config_exato
 
 
@@ -110,7 +115,11 @@ def processar_ciclo_conta(
 
     try:
         pedidos_resumo = cliente.buscar_pedidos_atualizados_desde(desde)
-    except TinyApiError:
+    except Exception:
+        # Antes so pegava TinyApiError - mas um erro HTTP (resp.raise_for_status())
+        # ou uma resposta que nao e JSON valido (resp.json()) sobe como
+        # requests.HTTPError/JSONDecodeError, nao TinyApiError, e nao era pego
+        # aqui. Ver o mesmo fix em monitor_cloud.py pro motivo completo.
         logger.exception("[%s] Falha ao buscar pedidos atualizados no Tiny", conta_tiny)
         return 0
 
@@ -217,7 +226,11 @@ def processar_ciclo(config: dict, conn, custo_planilha: str) -> int:
             continue
 
         cliente = TinyClient(token)
-        total += processar_ciclo_conta(conta_tiny, cliente, conta_cfg["canais"], config, conn, custos)
+        try:
+            total += processar_ciclo_conta(conta_tiny, cliente, conta_cfg["canais"], config, conn, custos)
+        except Exception:
+            # Nenhuma conta pode travar as outras 3 no mesmo ciclo.
+            logger.exception("[%s] Erro inesperado processando a conta - pulando pro proximo ciclo", conta_tiny)
 
     return total
 
