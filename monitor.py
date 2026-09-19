@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 import storage
 import supabase_writer
 from alerts import atualizar_planilha, enviar_email, enviar_whatsapp, montar_mensagem_alerta
-from custo_planilha import carregar_custos, sobrepor_custos_do_dashboard
+from custo_planilha import carregar_custos, recalcular_custo_pendente, sobrepor_custos_do_dashboard
 from margin_engine import calcular_margem
 from ml_client import MLClient, MLApiError
 from tiny_client import TinyClient, TinyApiError
@@ -217,6 +217,11 @@ def processar_ciclo(config: dict, conn, custo_planilha: str) -> int:
     custos = carregar_custos(custo_planilha)
     custos = sobrepor_custos_do_dashboard(custos)
     logger.info("Custos carregados (planilha + dashboard): %d SKU(s) com custo", len(custos))
+
+    n_corrigidos = recalcular_custo_pendente()
+    if n_corrigidos:
+        logger.info("Custo pendente preenchido no dashboard: %d item(ns) recalculado(s)", n_corrigidos)
+
     total = 0
     for conta_tiny, conta_cfg in config["tiny_contas"].items():
         token_env = conta_cfg["token_env"]

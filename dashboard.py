@@ -13,6 +13,7 @@ Publicado no Streamlit Community Cloud, as mesmas 2 variaveis vao em
 
 from __future__ import annotations
 
+import io
 import os
 from datetime import date, timedelta
 
@@ -268,13 +269,48 @@ with aba_custos:
             f"**{_fmt_moeda(resumo_sem_custo['receita_afetada'].sum())}** de receita no período."
         )
 
-        csv = resumo_sem_custo.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Baixar lista (CSV) para preencher e importar", csv, "produtos_sem_custo.csv", "text/csv")
+        buffer_xlsx = io.BytesIO()
+        resumo_sem_custo.assign(custo=None).to_excel(buffer_xlsx, index=False, sheet_name="custos_pendentes")
+        st.download_button(
+            "⬇️ Baixar lista (Excel) para preencher e importar",
+            buffer_xlsx.getvalue(),
+            "produtos_sem_custo.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
         st.caption(
-            "Ou preenche o custo direto na coluna 'Custo (R$)' abaixo e clica em Salvar — "
-            "grava no Supabase e o monitor.py passa a usar esse custo a partir do próximo ciclo."
+            "Preenche a coluna 'custo' e importa de volta abaixo, ou edita direto na tabela mais "
+            "embaixo. Nos dois casos grava no Supabase na hora. Pedidos NOVOS já usam o custo "
+            "certo no ciclo seguinte; pedidos JÁ LANÇADOS com esse SKU (que aparecem como 'custo "
+            "ausente' hoje) são corrigidos automaticamente pelo monitor.py em até ~15 min "
+            "(ele não pode escrever aqui direto - só o dashboard - por segurança, já que esse "
+            "link é compartilhado com o time)."
         )
+
+        arquivo = st.file_uploader("Importar planilha preenchida", type=["xlsx", "csv"], key="upload_custos")
+        if arquivo is not None:
+            tabela_importada = (
+                pd.read_excel(arquivo) if arquivo.name.endswith(".xlsx") else pd.read_csv(arquivo)
+            )
+            faltando = {"sku", "custo"} - set(tabela_importada.columns)
+            if faltando:
+                st.error(f"Planilha sem a(s) coluna(s): {', '.join(faltando)}")
+            else:
+                validos = tabela_importada[
+                    tabela_importada["custo"].notna() & (pd.to_numeric(tabela_importada["custo"], errors="coerce") > 0)
+                ]
+                if validos.empty:
+                    st.warning("Nenhuma linha com custo preenchido nessa planilha.")
+                elif st.button(f"💾 Importar {len(validos)} custo(s)"):
+                    registros = validos[["sku", "custo"]].astype({"sku": str}).to_dict("records")
+                    try:
+                        salvar_custos_no_supabase(registros)
+                        st.success(f"{len(registros)} custo(s) salvo(s) no Supabase.")
+                        carregar_tabela.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Falha ao salvar: {e}")
+
         resumo_sem_custo["custo_novo"] = None
         editado = st.data_editor(
             resumo_sem_custo[["sku", "quantidade", "receita_afetada", "pedidos", "custo_novo"]],
@@ -294,6 +330,8 @@ with aba_custos:
                 try:
                     salvar_custos_no_supabase(registros)
                     st.success(f"{len(registros)} custo(s) salvo(s) no Supabase.")
+                    carregar_tabela.clear()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Falha ao salvar: {e}")
 

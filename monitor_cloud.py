@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 import storage_supabase as storage
 import supabase_writer
 from alerts import enviar_email, enviar_whatsapp, montar_mensagem_alerta
-from custo_planilha import sobrepor_custos_do_dashboard
+from custo_planilha import recalcular_custo_pendente, sobrepor_custos_do_dashboard
 from margin_engine import calcular_margem
 from ml_client import MLApiError, MLClient
 from tiny_client import TinyApiError, TinyClient
@@ -172,6 +172,10 @@ def main():
     config = carregar_config()
     custos = sobrepor_custos_do_dashboard({})
     logger.info("Custos carregados do Supabase: %d SKU(s)", len(custos))
+
+    n_corrigidos = recalcular_custo_pendente()
+    if n_corrigidos:
+        logger.info("Custo pendente preenchido no dashboard: %d item(ns) recalculado(s)", n_corrigidos)
 
     total = 0
     for conta_tiny, conta_cfg in config["tiny_contas"].items():
