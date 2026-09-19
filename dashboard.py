@@ -104,6 +104,12 @@ def _marketplace_generico(canal: str) -> str:
     return canal.capitalize()
 
 
+def _nome_conta(canal: str) -> str:
+    """Nome legivel da conta/canal bruto pra tabela detalhada (ex.:
+    "meli_conta_1" -> "Meli Conta 1")."""
+    return str(canal).replace("_", " ").title()
+
+
 def expandir_por_codigo_pai(registros: list[dict]) -> list[dict]:
     """Custo nao muda entre tamanhos do mesmo produto - preencher o custo de
     UM SKU aplica automaticamente o mesmo custo a todos os SKUs irmaos (mesmo
@@ -156,19 +162,48 @@ def _fmt_moeda(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 
-def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, titulo: str):
+_CORES_MARKETPLACE = {
+    "Mercado Livre": "#FFE600",  # amarelo da marca
+    "Shopee": "#EE4D2D",         # laranja da marca
+    "Amazon": "#146EB4",         # azul da marca
+    "TikTok Shop": "#25F4EE",    # ciano da marca
+}
+_PALETA_EXTRA = ["#4C78A8", "#72B7B2", "#54A24B", "#B279A2", "#F58518", "#9D755D"]
+
+
+def _cores_para_categorias(categorias: list[str]) -> alt.Scale:
+    """Cores fixas pros marketplaces conhecidos (senao Meli/Shopee/Amazon
+    saiam todos em tons de azul do esquema padrao do Altair, dificeis de
+    distinguir a olho) - categoria desconhecida cai numa paleta extra."""
+    dominio, cores, i = [], [], 0
+    for cat in categorias:
+        dominio.append(cat)
+        if cat in _CORES_MARKETPLACE:
+            cores.append(_CORES_MARKETPLACE[cat])
+        else:
+            cores.append(_PALETA_EXTRA[i % len(_PALETA_EXTRA)])
+            i += 1
+    return alt.Scale(domain=dominio, range=cores)
+
+
+def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, titulo: str, cores: alt.Scale | None = None):
     """Grafico de pizza via Altair (ja vem junto com o Streamlit, nao
     precisa de dependencia nova) - st.bar_chart/st.altair_chart nativos do
     Streamlit nao tem tipo pizza."""
+    cor_encoding = (
+        alt.Color(f"{campo_categoria}:N", legend=alt.Legend(title=titulo), scale=cores)
+        if cores is not None
+        else alt.Color(f"{campo_categoria}:N", legend=alt.Legend(title=titulo))
+    )
     base = alt.Chart(df).encode(
         theta=alt.Theta(f"{campo_valor}:Q", stack=True),
-        color=alt.Color(f"{campo_categoria}:N", legend=alt.Legend(title=titulo)),
+        color=cor_encoding,
         tooltip=[
             alt.Tooltip(f"{campo_categoria}:N", title=titulo),
             alt.Tooltip(f"{campo_valor}:Q", title="Valor", format=",.2f"),
         ],
     )
-    return base.mark_arc(outerRadius=110)
+    return base.mark_arc(outerRadius=160).properties(height=420)
 
 
 def _injetar_css_kpi():
@@ -921,26 +956,47 @@ with aba_visao:
     por_mkt["margem_pct"] = (por_mkt["margem"] / por_mkt["receita"] * 100).round(1)
     por_mkt = por_mkt.sort_values("margem", ascending=False)
     por_mkt["margem_abs"] = por_mkt["margem"].abs()
+    escala_mkt = _cores_para_categorias(por_mkt["marketplace"].tolist())
 
     pc1, pc2 = st.columns(2)
     with pc1:
         st.markdown("##### 💰 Faturamento por Marketplace")
         st.altair_chart(
-            _grafico_pizza(por_mkt, "marketplace", "receita", "Marketplace"), use_container_width=True
+            _grafico_pizza(por_mkt, "marketplace", "receita", "Marketplace", cores=escala_mkt),
+            use_container_width=True,
         )
     with pc2:
         st.markdown("##### 📊 Margem por Marketplace")
         st.altair_chart(
-            _grafico_pizza(por_mkt, "marketplace", "margem_abs", "Marketplace"), use_container_width=True
+            _grafico_pizza(por_mkt, "marketplace", "margem_abs", "Marketplace", cores=escala_mkt),
+            use_container_width=True,
         )
         st.caption(
             "Tamanho da fatia = valor absoluto (margem negativa também vira fatia) - passe o mouse ou "
             "veja a tabela abaixo pro sinal real."
         )
+
+    st.markdown("###### Detalhado por conta")
+    pedidos_f_mkt["conta"] = pedidos_f_mkt["canal"].map(_nome_conta)
+    por_conta = (
+        pedidos_f_mkt.groupby(["marketplace", "conta"])
+        .agg(receita=("receita", "sum"), margem=("margem_contribuicao", "sum"), pedidos=("numero_pedido", "count"))
+        .reset_index()
+    )
+    por_conta["margem_pct"] = (por_conta["margem"] / por_conta["receita"] * 100).round(1)
+    por_conta = por_conta.sort_values(["marketplace", "margem"], ascending=[True, False])
     st.dataframe(
-        por_mkt[["marketplace", "receita", "margem", "margem_pct", "pedidos"]],
+        por_conta[["marketplace", "conta", "receita", "margem", "margem_pct", "pedidos"]],
         hide_index=True,
         use_container_width=True,
+        column_config={
+            "marketplace": "Marketplace",
+            "conta": "Conta",
+            "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+            "margem": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
+            "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
+            "pedidos": "Pedidos",
+        },
     )
 
 # ---- Metas diárias --------------------------------------------------------
