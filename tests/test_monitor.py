@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import storage
 import monitor
 from margin_engine import ItemPedido
-from ml_client import MLApiError
+from ml_client import DetalheFinanceiroPedido, MLApiError
 from tiny_client import TinyApiError
 
 
@@ -27,29 +27,38 @@ CANAL_SEM_ML = {
 
 
 class _MLClientFake:
-    def __init__(self, receita=None, erro=False):
+    def __init__(self, receita=None, erro=False, valor_venda=None, comissao_real=0.0, frete_real=0.0):
         self._receita = receita
         self._erro = erro
+        self._valor_venda = valor_venda if valor_venda is not None else receita
+        self._comissao_real = comissao_real
+        self._frete_real = frete_real
 
-    def obter_receita_liquida_pedido(self, numero_ecommerce):
+    def obter_detalhe_financeiro_pedido(self, numero_ecommerce):
         if self._erro:
             raise MLApiError("falha simulada")
-        return self._receita
+        return DetalheFinanceiroPedido(
+            receita_liquida=self._receita,
+            valor_venda=self._valor_venda,
+            comissao_real=self._comissao_real,
+            frete_real=self._frete_real,
+        )
 
 
 def test_canal_sem_flag_usa_total_pedido_do_tiny():
     pedido = {"total_pedido": "100.00", "numero_ecommerce": "X"}
-    receita, canal_cfg = monitor._resolver_receita_e_config(pedido, "shopee_1", CANAL_SEM_ML, {})
+    receita, canal_cfg, detalhe = monitor._resolver_receita_e_config(pedido, "shopee_1", CANAL_SEM_ML, {})
 
     assert receita == 100.0
     assert canal_cfg is CANAL_SEM_ML  # nao mexeu no config
+    assert detalhe is None
 
 
 def test_canal_com_flag_usa_receita_exata_e_zera_comissao_frete(monkeypatch):
     pedido = {"total_pedido": "145.49", "numero_ecommerce": "2000018504802760"}
-    ml_clientes = {"meli_conta_2": _MLClientFake(receita=115.45)}
+    ml_clientes = {"meli_conta_2": _MLClientFake(receita=115.45, valor_venda=180.0, comissao_real=47.5, frete_real=17.05)}
 
-    receita, canal_cfg = monitor._resolver_receita_e_config(
+    receita, canal_cfg, detalhe = monitor._resolver_receita_e_config(
         pedido, "meli_conta_2", CANAL_MELI_2_COM_ML, ml_clientes
     )
 
@@ -57,18 +66,22 @@ def test_canal_com_flag_usa_receita_exata_e_zera_comissao_frete(monkeypatch):
     assert canal_cfg["comissao_pct"] == 0.0
     assert canal_cfg["frete_pct"] == 0.0
     assert canal_cfg["imposto_pct"] == 4.0  # imposto continua estimado
+    assert detalhe.valor_venda == 180.0
+    assert detalhe.comissao_real == 47.5
+    assert detalhe.frete_real == 17.05
 
 
 def test_falha_na_api_do_ml_cai_para_estimativa_do_tiny():
     pedido = {"total_pedido": "145.49", "numero_ecommerce": "2000018504802760"}
     ml_clientes = {"meli_conta_2": _MLClientFake(erro=True)}
 
-    receita, canal_cfg = monitor._resolver_receita_e_config(
+    receita, canal_cfg, detalhe = monitor._resolver_receita_e_config(
         pedido, "meli_conta_2", CANAL_MELI_2_COM_ML, ml_clientes
     )
 
     assert receita == 145.49
     assert canal_cfg["comissao_pct"] == 14.0  # nao zerou, usou o config original
+    assert detalhe is None
 
 
 CONFIG_SEM_ALERTA = {

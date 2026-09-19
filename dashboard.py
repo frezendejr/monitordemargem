@@ -384,10 +384,43 @@ with aba_custos:
 
 # ---- Venda a venda --------------------------------------------------------
 with aba_vendas:
-    colunas_exibir = [
-        "numero_pedido", "conta_tiny", "canal", "data_pedido", "receita",
-        "margem_contribuicao", "margem_pct", "custo_ausente", "alertado",
-    ]
     coluna_ordenacao = "processado_em" if "processado_em" in pedidos_f.columns else "numero_pedido"
-    tabela_vendas = pedidos_f.sort_values(coluna_ordenacao, ascending=False)[colunas_exibir]
-    st.dataframe(tabela_vendas, hide_index=True, use_container_width=True)
+    tabela_vendas = pedidos_f.sort_values(coluna_ordenacao, ascending=False).copy()
+
+    # Pedidos gravados antes do detalhamento (ou ainda nao recalculados pelo
+    # monitor) nao tem valor_venda/cmv/imposto/comissao/frete/ads - cai pra
+    # receita/None em vez de sumir da tabela.
+    for coluna in ["cmv", "imposto", "comissao", "frete", "ads"]:
+        if coluna not in tabela_vendas.columns:
+            tabela_vendas[coluna] = None
+    if "valor_venda" not in tabela_vendas.columns:
+        tabela_vendas["valor_venda"] = None
+    tabela_vendas["valor_venda"] = tabela_vendas["valor_venda"].fillna(tabela_vendas["receita"])
+
+    st.caption(
+        "Valor Venda → (-) CMV → (-) Imposto → (-) Comissão → (-) Frete → (-) Ads → (=) Margem. "
+        "Pro Mercado Livre, Comissão/Frete são o valor REAL cobrado (via API do ML), não estimativa - "
+        "os outros canais usam % estimado (Tiny não expõe o valor exato cobrado pelo marketplace). "
+        "Vazio = pedido lançado antes desse detalhamento existir."
+    )
+
+    colunas_exibir = [
+        "numero_pedido", "conta_tiny", "canal", "data_pedido", "valor_venda", "cmv",
+        "imposto", "comissao", "frete", "ads", "margem_contribuicao", "margem_pct",
+        "custo_ausente", "alertado",
+    ]
+    st.dataframe(
+        tabela_vendas[colunas_exibir],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "valor_venda": st.column_config.NumberColumn("Valor Venda", format="R$ %.2f"),
+            "cmv": st.column_config.NumberColumn("CMV", format="R$ %.2f"),
+            "imposto": st.column_config.NumberColumn("Imposto", format="R$ %.2f"),
+            "comissao": st.column_config.NumberColumn("Comissão", format="R$ %.2f"),
+            "frete": st.column_config.NumberColumn("Frete", format="R$ %.2f"),
+            "ads": st.column_config.NumberColumn("Ads", format="R$ %.2f"),
+            "margem_contribuicao": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
+            "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
+        },
+    )

@@ -29,12 +29,21 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DetalheFinanceiroPedido:
+    receita_liquida: float
+    valor_venda: float
+    comissao_real: float
+    frete_real: float
 
 BASE_URL = "https://api.mercadolibre.com"
 MP_BASE_URL = "https://api.mercadopago.com"
@@ -223,16 +232,43 @@ class MLClient:
         """Soma o net_received_amount de todos os pagamentos aprovados do
         pedido - o valor que a Amo efetivamente recebe, ja liquido de
         tarifa/frete real e de qualquer cupom subsidiado pelo ML."""
-        pedido_ml = self.obter_pedido(ml_order_id)
+        return self.obter_detalhe_financeiro_pedido(ml_order_id).receita_liquida
 
-        total = 0.0
+    def obter_detalhe_financeiro_pedido(self, ml_order_id: str) -> "DetalheFinanceiroPedido":
+        """Detalhe financeiro exato do pedido (nao estimado por %):
+
+        - valor_venda: soma de unit_price*quantity dos itens (preco de
+          tabela, o que aparece como "Preco do produto" no extrato do ML).
+        - comissao_real: soma de order_items[].sale_fee - confirmado que bate
+          exatamente com "Tarifa de venda total" do extrato (pedido real
+          2000018537926936: sale_fee=47.50, extrato mostrava -R$47,50).
+        - receita_liquida: soma do net_received_amount dos pagamentos
+          aprovados - o que a Amo recebe de fato.
+        - frete_real: valor_venda - comissao_real - receita_liquida. A API
+          do ML nao expoe o frete cobrado do vendedor como campo separado
+          (so via endpoint de shipment) - mas esse resto bate exatamente com
+          "Envios" do extrato no mesmo pedido real (R$27,05). Pode incluir
+          ajustes raros (ex.: reembolso parcial) que nao sejam frete puro.
+        """
+        pedido_ml = self.obter_pedido(ml_order_id)
+        itens = pedido_ml.get("order_items", [])
+
+        valor_venda = sum(item["unit_price"] * item["quantity"] for item in itens)
+        comissao_real = sum(item.get("sale_fee") or 0.0 for item in itens)
+
+        receita_liquida = 0.0
         for pagamento_resumo in pedido_ml.get("payments", []):
             if pagamento_resumo.get("status") != "approved":
                 continue
             pagamento = self.obter_pagamento(str(pagamento_resumo["id"]))
-            total += pagamento["transaction_details"]["net_received_amount"]
+            receita_liquida += pagamento["transaction_details"]["net_received_amount"]
 
-        return round(total, 2)
+        return DetalheFinanceiroPedido(
+            receita_liquida=round(receita_liquida, 2),
+            valor_venda=round(valor_venda, 2),
+            comissao_real=round(comissao_real, 2),
+            frete_real=round(valor_venda - comissao_real - receita_liquida, 2),
+        )
 
 
 def _main():

@@ -36,13 +36,19 @@ def _base_url() -> str:
     return os.environ["SUPABASE_URL"].rstrip("/")
 
 
-def enviar_pedido(conta_tiny: str, resultado: ResultadoMargem, alertado: bool) -> None:
+def enviar_pedido(conta_tiny: str, resultado: ResultadoMargem, alertado: bool, valor_venda: float | None = None) -> None:
     payload = {
         "conta_tiny": conta_tiny,
         "numero_pedido": resultado.numero_pedido,
         "canal": resultado.canal,
         "data_pedido": resultado.data_pedido,
         "receita": resultado.receita,
+        "valor_venda": valor_venda if valor_venda is not None else resultado.receita,
+        "cmv": resultado.cmv,
+        "imposto": resultado.imposto,
+        "comissao": resultado.comissao,
+        "frete": resultado.frete,
+        "ads": resultado.ads,
         "margem_contribuicao": resultado.margem_contribuicao,
         "margem_pct": resultado.margem_pct,
         "custo_ausente": resultado.custo_ausente,

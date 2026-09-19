@@ -27,7 +27,7 @@ import supabase_writer
 from alerts import atualizar_planilha, enviar_email, enviar_whatsapp, montar_mensagem_alerta
 from custo_planilha import carregar_custos, recalcular_custo_pendente, sobrepor_custos_do_dashboard
 from margin_engine import calcular_margem
-from ml_client import MLClient, MLApiError
+from ml_client import DetalheFinanceiroPedido, MLApiError, MLClient
 from tiny_client import TinyClient, TinyApiError
 
 logging.basicConfig(
@@ -55,7 +55,7 @@ def _resolver_receita_e_config(
     canal: str,
     canal_config: dict,
     ml_clientes: dict[str, MLClient],
-) -> tuple[float, dict]:
+) -> tuple[float, dict, DetalheFinanceiroPedido | None]:
     """Decide a receita e o canal_config a usar no calculo da margem.
 
     Se o canal tiver `receita_exata_via_ml` (hoje so meli_conta_2), busca a
@@ -67,13 +67,13 @@ def _resolver_receita_e_config(
     """
     if not canal_config.get("receita_exata_via_ml"):
         receita = float(pedido_completo.get("total_pedido", 0) or 0)
-        return receita, canal_config
+        return receita, canal_config, None
 
     numero_ecommerce = pedido_completo.get("numero_ecommerce")
     try:
         if canal not in ml_clientes:
             ml_clientes[canal] = MLClient(canal)
-        receita_exata = ml_clientes[canal].obter_receita_liquida_pedido(numero_ecommerce)
+        detalhe = ml_clientes[canal].obter_detalhe_financeiro_pedido(numero_ecommerce)
     except MLApiError:
         logger.exception(
             "[%s] Falha ao buscar receita exata via ML pro pedido ML %s - usando estimativa por %%",
@@ -81,7 +81,7 @@ def _resolver_receita_e_config(
             numero_ecommerce,
         )
         receita = float(pedido_completo.get("total_pedido", 0) or 0)
-        return receita, canal_config
+        return receita, canal_config, None
 
     # faixas_frete tem prioridade sobre frete_pct em _percentual_frete - zerar
     # so o frete_pct nao bastava pro canal meli_conta_1 (usa faixas_frete),
@@ -89,7 +89,7 @@ def _resolver_receita_e_config(
     # que ja vem liquida de frete real (bug real: confirmado contra a venda
     # 2000018537926936 em 2026-09-19, R$26,32 de frete cobrado em dobro).
     canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0, faixas_frete=None)
-    return receita_exata, canal_config_exato
+    return detalhe.receita_liquida, canal_config_exato, detalhe
 
 
 def processar_ciclo_conta(
@@ -160,7 +160,7 @@ def processar_ciclo_conta(
             continue
 
         itens = cliente.montar_itens(pedido_completo, custos)
-        receita, canal_config_efetivo = _resolver_receita_e_config(
+        receita, canal_config_efetivo, detalhe_ml = _resolver_receita_e_config(
             pedido_completo, canal, canais_config[canal], ml_clientes
         )
 
@@ -172,6 +172,16 @@ def processar_ciclo_conta(
             canal_config=canal_config_efetivo,
             data_pedido=pedido_completo.get("data_pedido", ""),
         )
+
+        # valor_venda/comissao/frete "reais" so pra exibicao detalhada no
+        # dashboard - nao mudam margem_contribuicao (ja calculada acima com
+        # receita liquida e comissao/frete zerados, ver _resolver_receita_e_config).
+        if detalhe_ml is not None:
+            valor_venda = detalhe_ml.valor_venda
+            resultado.comissao = detalhe_ml.comissao_real
+            resultado.frete = detalhe_ml.frete_real
+        else:
+            valor_venda = resultado.receita
 
         threshold = config.get("alertas", {}).get("margem_negativa_threshold", 0)
         deve_alertar = resultado.margem_contribuicao < threshold
@@ -186,7 +196,7 @@ def processar_ciclo_conta(
         storage.salvar_pedido(conn, conta_tiny, resultado, alertado=deve_alertar)
 
         try:
-            supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar)
+            supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar, valor_venda=valor_venda)
             supabase_writer.enviar_itens(conta_tiny, resultado)
         except (supabase_writer.SupabaseError, KeyError):
             # So alimenta o dashboard - nunca pode travar o monitor. O
