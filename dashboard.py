@@ -558,6 +558,58 @@ def montar_relatorio_diario(
 
 st.title("📊 Margem de contribuição — Grupo Amo")
 
+_LIMIAR_ATRASO_MIN = 20  # ciclo roda a cada 15min "de calendario" - ver monitor.yml
+_LIMIAR_CRITICO_MIN = 60
+
+
+def obter_checkpoints() -> pd.DataFrame:
+    """Le margin_monitor_checkpoint (1 linha por conta Tiny com a hora da
+    ultima sincronizacao bem-sucedida do monitor) - so pra mostrar "ultima
+    atualizacao" no topo do dashboard, nao entra em nenhum calculo de
+    margem/faturamento. Tabela tem RLS travada por padrao (so service role)
+    - precisa da policy de SELECT pra anon em supabase_schema_checkpoint_leitura.sql."""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    resp = requests.get(
+        f"{url}/rest/v1/margin_monitor_checkpoint",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        params={"select": "*"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return pd.DataFrame(resp.json())
+
+
+col_status, col_botao = st.columns([5, 1])
+with col_status:
+    try:
+        checkpoints = obter_checkpoints()
+    except Exception:
+        checkpoints = None
+    if checkpoints is None:
+        st.caption("⚪ Não foi possível checar a última sincronização.")
+    elif checkpoints.empty:
+        st.caption("⚪ Sem dado de sincronização ainda - a policy de leitura foi cadastrada? Ver supabase_schema_checkpoint_leitura.sql.")
+    else:
+        checkpoints["quando"] = pd.to_datetime(checkpoints["ultima_busca_iso"], utc=True)
+        mais_antigo = checkpoints["quando"].min()
+        minutos_atras = (pd.Timestamp.now(tz="UTC") - mais_antigo).total_seconds() / 60
+        if minutos_atras < _LIMIAR_ATRASO_MIN:
+            cor, rotulo = "🟢", "em dia"
+        elif minutos_atras < _LIMIAR_CRITICO_MIN:
+            cor, rotulo = "🟡", "atrasando"
+        else:
+            cor, rotulo = "🔴", "atrasado"
+        tempo_fmt = f"há {int(minutos_atras)} min" if minutos_atras < 60 else f"há {minutos_atras / 60:.1f}h"
+        with st.expander(f"{cor} Última sincronização: {tempo_fmt} ({rotulo}) - detalhar por conta"):
+            for _, linha in checkpoints.sort_values("quando").iterrows():
+                hora_brt = (linha["quando"] - pd.Timedelta(hours=3)).strftime("%d/%m %H:%M")
+                st.caption(f"{linha['conta_tiny']}: {hora_brt} (horário de Brasília)")
+with col_botao:
+    if st.button("🔄 Atualizar", help="Limpa o cache do dashboard e relê o Supabase agora (o cache normal dura 2min)."):
+        st.cache_data.clear()
+        st.rerun()
+
 try:
     pedidos = carregar_tabela("margin_monitor_pedidos")
     itens = carregar_tabela("margin_monitor_itens")
