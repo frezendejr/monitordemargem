@@ -69,22 +69,40 @@ def enviar_itens(conta_tiny: str, resultado: ResultadoMargem, anuncios: dict[str
         return
 
     anuncios = anuncios or {}
+
+    # Um pedido pode ter o mesmo SKU em 2 linhas separadas (ex.: mesmo
+    # produto adicionado 2x no carrinho) - o upsert do Postgres nao aceita
+    # 2 linhas com a mesma chave de conflito dentro do MESMO comando
+    # ("ON CONFLICT DO UPDATE command cannot affect row a second time"),
+    # entao soma as linhas do mesmo sku ANTES de montar o payload.
+    por_sku: dict[str, dict] = {}
+    for item in resultado.itens:
+        acc = por_sku.setdefault(
+            item.sku,
+            {"quantidade": 0.0, "receita": 0.0, "cmv": 0.0, "margem_contribuicao": 0.0, "custo_ausente": False},
+        )
+        acc["quantidade"] += item.quantidade
+        acc["receita"] += item.receita
+        acc["cmv"] += item.cmv
+        acc["margem_contribuicao"] += item.margem_contribuicao
+        acc["custo_ausente"] = acc["custo_ausente"] or item.custo_ausente
+
     payload = [
         {
             "conta_tiny": conta_tiny,
             "numero_pedido": resultado.numero_pedido,
-            "sku": item.sku,
+            "sku": sku,
             "canal": resultado.canal,
             "data_pedido": resultado.data_pedido,
-            "quantidade": item.quantidade,
-            "receita": item.receita,
-            "cmv": item.cmv,
-            "margem_contribuicao": item.margem_contribuicao,
-            "margem_pct": item.margem_pct,
-            "custo_ausente": item.custo_ausente,
-            "anuncio_id": anuncios.get(item.sku),
+            "quantidade": acc["quantidade"],
+            "receita": round(acc["receita"], 2),
+            "cmv": round(acc["cmv"], 2),
+            "margem_contribuicao": round(acc["margem_contribuicao"], 2),
+            "margem_pct": round(acc["margem_contribuicao"] / acc["receita"] * 100, 2) if acc["receita"] else 0.0,
+            "custo_ausente": acc["custo_ausente"],
+            "anuncio_id": anuncios.get(sku),
         }
-        for item in resultado.itens
+        for sku, acc in por_sku.items()
     ]
     resp = requests.post(
         f"{_base_url()}/rest/v1/margin_monitor_itens?on_conflict=conta_tiny,numero_pedido,sku",
