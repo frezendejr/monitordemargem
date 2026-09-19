@@ -97,13 +97,26 @@ class TinyClient:
         pedidos: list[dict] = []
         pagina = 1
         while True:
-            retorno = self._post(
-                "pedidos.pesquisa.php",
-                {
-                    "dataAtualizacao": desde.strftime("%d/%m/%Y %H:%M:%S"),
-                    "pagina": pagina,
-                },
-            )
+            try:
+                retorno = self._post(
+                    "pedidos.pesquisa.php",
+                    {
+                        "dataAtualizacao": desde.strftime("%d/%m/%Y %H:%M:%S"),
+                        "pagina": pagina,
+                    },
+                )
+            except TinyApiError as e:
+                # O Tiny devolve status "Erro" (nao um retorno OK com lista
+                # vazia) quando a busca simplesmente nao acha nenhum pedido no
+                # periodo - bug real encontrado em 2026-09-19: isso fazia
+                # houve_falha_de_api=True em QUALQUER ciclo sem pedido novo,
+                # travando o checkpoint indefinidamente ate a proxima janela
+                # com pedido de verdade (dava horas de atraso, nao os 15min
+                # esperados). "Sem resultado" nao e falha - trata como pagina
+                # vazia e encerra a paginacao normalmente.
+                if "retornou registros" in str(e).lower():
+                    break
+                raise
             lote = [p["pedido"] for p in retorno.get("pedidos", [])]
             # Pedido cancelado nao e venda - nunca deve entrar no calculo de
             # receita/margem. Confirmado real: 6 pedidos Shopee cancelados
@@ -133,14 +146,21 @@ class TinyClient:
         pedidos: list[dict] = []
         pagina = 1
         while True:
-            retorno = self._post(
-                "pedidos.pesquisa.php",
-                {
-                    "dataInicial": data_inicial.strftime("%d/%m/%Y"),
-                    "dataFinal": data_final.strftime("%d/%m/%Y"),
-                    "pagina": pagina,
-                },
-            )
+            try:
+                retorno = self._post(
+                    "pedidos.pesquisa.php",
+                    {
+                        "dataInicial": data_inicial.strftime("%d/%m/%Y"),
+                        "dataFinal": data_final.strftime("%d/%m/%Y"),
+                        "pagina": pagina,
+                    },
+                )
+            except TinyApiError as e:
+                # Mesmo caso de buscar_pedidos_atualizados_desde: "sem
+                # resultado" nao e falha de API.
+                if "retornou registros" in str(e).lower():
+                    break
+                raise
             lote = [p["pedido"] for p in retorno.get("pedidos", [])]
             lote = [p for p in lote if p.get("situacao") != "Cancelado"]
             pedidos.extend(lote)
