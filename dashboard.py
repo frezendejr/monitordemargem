@@ -1241,16 +1241,42 @@ with aba_vendas:
         tabela_vendas["valor_venda"] = None
     tabela_vendas["valor_venda"] = tabela_vendas["valor_venda"].fillna(tabela_vendas["receita"])
 
+    # numero_ecommerce (nº da venda no marketplace) so existe em
+    # margin_monitor_itens, nao em margin_monitor_pedidos - traz pra ca via
+    # merge (1 pedido pode ter varios itens, mas todos com o mesmo
+    # numero_ecommerce, por isso o drop_duplicates).
+    if "numero_ecommerce" in itens.columns:
+        mapa_ecommerce = itens[["conta_tiny", "numero_pedido", "numero_ecommerce"]].drop_duplicates(
+            subset=["conta_tiny", "numero_pedido"]
+        )
+        tabela_vendas = tabela_vendas.merge(mapa_ecommerce, on=["conta_tiny", "numero_pedido"], how="left")
+    else:
+        tabela_vendas["numero_ecommerce"] = None
+    tabela_vendas["numero_ecommerce"] = tabela_vendas["numero_ecommerce"].fillna("")
+
+    # processado_em = hora em que ESTE pedido foi gravado pela 1a vez no
+    # Supabase (default now() na coluna, nao muda em upsert - ver
+    # supabase_schema.sql) - e o jeito de validar "isso realmente acabou de
+    # sincronizar" direto na tabela, ja que data_pedido do Tiny so tem DIA,
+    # sem horario.
+    if "processado_em" in tabela_vendas.columns:
+        tabela_vendas["sincronizado_em"] = (
+            pd.to_datetime(tabela_vendas["processado_em"], utc=True, errors="coerce") - pd.Timedelta(hours=3)
+        ).dt.strftime("%d/%m %H:%M")
+    else:
+        tabela_vendas["sincronizado_em"] = None
+
     st.caption(
         "Valor Venda → (-) CMV → (-) Imposto → (-) Comissão → (-) Frete → (-) Ads → (=) Margem. "
         "Pro Mercado Livre, Comissão/Frete são o valor REAL cobrado (via API do ML), não estimativa - "
         "os outros canais usam % estimado (Tiny não expõe o valor exato cobrado pelo marketplace). "
-        "Vazio = pedido lançado antes desse detalhamento existir."
+        "Vazio = pedido lançado antes desse detalhamento existir. \"Sincronizado em\" é quando ESTE "
+        "sistema gravou o pedido (horário de Brasília) - o Tiny não expõe a hora da venda, só a data."
     )
 
     colunas_exibir = [
-        "numero_pedido", "conta_tiny", "canal", "data_pedido", "valor_venda", "cmv",
-        "imposto", "comissao", "frete", "ads", "margem_contribuicao", "margem_pct",
+        "numero_pedido", "numero_ecommerce", "conta_tiny", "canal", "data_pedido", "sincronizado_em",
+        "valor_venda", "cmv", "imposto", "comissao", "frete", "ads", "margem_contribuicao", "margem_pct",
         "custo_ausente", "alertado",
     ]
     st.dataframe(
@@ -1258,6 +1284,9 @@ with aba_vendas:
         hide_index=True,
         use_container_width=True,
         column_config={
+            "numero_pedido": "Pedido (Tiny)",
+            "numero_ecommerce": "Nº da venda (marketplace)",
+            "sincronizado_em": "Sincronizado em",
             "valor_venda": st.column_config.NumberColumn("Valor Venda", format="R$ %.2f"),
             "cmv": st.column_config.NumberColumn("CMV", format="R$ %.2f"),
             "imposto": st.column_config.NumberColumn("Imposto", format="R$ %.2f"),
