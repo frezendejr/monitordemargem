@@ -89,6 +89,21 @@ def _codigo_pai(sku: str) -> str:
     return sku
 
 
+def _marketplace_generico(canal: str) -> str:
+    """Agrupa os canais (meli_conta_1..4, shopee_1/2, etc.) pelo MARKETPLACE
+    em si - pra graficos onde nao interessa qual conta/CNPJ especifico
+    vendeu, so o marketplace (ex.: "Meli" junta as 4 contas do Mercado
+    Livre num so fatia)."""
+    canal = str(canal)
+    if canal.startswith("meli_conta"):
+        return "Mercado Livre"
+    if canal.startswith("shopee"):
+        return "Shopee"
+    if canal == "tiktok_shop":
+        return "TikTok Shop"
+    return canal.capitalize()
+
+
 def expandir_por_codigo_pai(registros: list[dict]) -> list[dict]:
     """Custo nao muda entre tamanhos do mesmo produto - preencher o custo de
     UM SKU aplica automaticamente o mesmo custo a todos os SKUs irmaos (mesmo
@@ -808,49 +823,37 @@ with aba_visao:
         st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
 
     st.subheader("Faturamento e margem por marketplace")
-    por_canal = (
-        pedidos_f.groupby("canal")
+    pedidos_f_mkt = pedidos_f.copy()
+    pedidos_f_mkt["marketplace"] = pedidos_f_mkt["canal"].map(_marketplace_generico)
+    por_mkt = (
+        pedidos_f_mkt.groupby("marketplace")
         .agg(receita=("receita", "sum"), margem=("margem_contribuicao", "sum"), pedidos=("numero_pedido", "count"))
         .reset_index()
     )
-    por_canal["margem_pct"] = (por_canal["margem"] / por_canal["receita"] * 100).round(1)
-    por_canal = por_canal.sort_values("margem", ascending=False)
-    por_canal["margem_abs"] = por_canal["margem"].abs()
+    por_mkt["margem_pct"] = (por_mkt["margem"] / por_mkt["receita"] * 100).round(1)
+    por_mkt = por_mkt.sort_values("margem", ascending=False)
+    por_mkt["margem_abs"] = por_mkt["margem"].abs()
 
     pc1, pc2 = st.columns(2)
     with pc1:
+        st.markdown("##### 💰 Faturamento por Marketplace")
         st.altair_chart(
-            _grafico_pizza(por_canal, "canal", "receita", "Marketplace"), use_container_width=True
+            _grafico_pizza(por_mkt, "marketplace", "receita", "Marketplace"), use_container_width=True
         )
-        st.caption("Faturamento por marketplace")
     with pc2:
+        st.markdown("##### 📊 Margem por Marketplace")
         st.altair_chart(
-            _grafico_pizza(por_canal, "canal", "margem_abs", "Marketplace"), use_container_width=True
+            _grafico_pizza(por_mkt, "marketplace", "margem_abs", "Marketplace"), use_container_width=True
         )
         st.caption(
-            "Margem por marketplace (tamanho da fatia = valor absoluto - passe o mouse pra ver o sinal "
-            "real; canal com margem negativa também aparece como fatia, confira a tabela abaixo)."
+            "Tamanho da fatia = valor absoluto (margem negativa também vira fatia) - passe o mouse ou "
+            "veja a tabela abaixo pro sinal real."
         )
     st.dataframe(
-        por_canal[["canal", "receita", "margem", "margem_pct", "pedidos"]],
+        por_mkt[["marketplace", "receita", "margem", "margem_pct", "pedidos"]],
         hide_index=True,
         use_container_width=True,
     )
-
-    st.subheader("Detalhado por conta Tiny (CNPJ)")
-    por_conta = (
-        pedidos_f.groupby("conta_tiny")
-        .agg(receita=("receita", "sum"), margem=("margem_contribuicao", "sum"), pedidos=("numero_pedido", "count"))
-        .reset_index()
-    )
-    por_conta["margem_pct"] = (por_conta["margem"] / por_conta["receita"] * 100).round(1)
-    por_conta = por_conta.sort_values("margem", ascending=False)
-
-    st.altair_chart(
-        _grafico_pizza(por_conta, "conta_tiny", "receita", "Conta"), use_container_width=True
-    )
-    st.caption("Faturamento por conta")
-    st.dataframe(por_conta, hide_index=True, use_container_width=True)
 
 # ---- Metas diárias --------------------------------------------------------
 with aba_metas:
