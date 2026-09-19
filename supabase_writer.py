@@ -64,7 +64,12 @@ def enviar_pedido(conta_tiny: str, resultado: ResultadoMargem, alertado: bool, v
         raise SupabaseError(f"Falha ao gravar pedido no Supabase: {resp.status_code} {resp.text}")
 
 
-def enviar_itens(conta_tiny: str, resultado: ResultadoMargem, anuncios: dict[str, str] | None = None) -> None:
+def enviar_itens(
+    conta_tiny: str,
+    resultado: ResultadoMargem,
+    anuncios: dict[str, str] | None = None,
+    numero_ecommerce: str | None = None,
+) -> None:
     if not resultado.itens:
         return
 
@@ -101,6 +106,7 @@ def enviar_itens(conta_tiny: str, resultado: ResultadoMargem, anuncios: dict[str
             "margem_pct": round(acc["margem_contribuicao"] / acc["receita"] * 100, 2) if acc["receita"] else 0.0,
             "custo_ausente": acc["custo_ausente"],
             "anuncio_id": anuncios.get(sku),
+            "numero_ecommerce": numero_ecommerce,
         }
         for sku, acc in por_sku.items()
     ]

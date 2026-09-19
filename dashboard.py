@@ -743,6 +743,8 @@ with aba_visao:
             detalhe["perda"] = detalhe["cmv"] - detalhe["receita"]
             if "anuncio_id" not in detalhe.columns:
                 detalhe["anuncio_id"] = None
+            if "numero_ecommerce" not in detalhe.columns:
+                detalhe["numero_ecommerce"] = None
 
             def _sugestao(row) -> str:
                 if pd.notna(row["custo_referencia"]) and abs(row["custo_unitario"] - row["custo_referencia"]) > 0.01:
@@ -754,17 +756,24 @@ with aba_visao:
 
             detalhe["sugestão"] = detalhe.apply(_sugestao, axis=1)
 
-            st.dataframe(
+            # data_editor (mesmo com tudo desabilitado) deixa selecionar e
+            # copiar o texto de UMA celula so - st.dataframe normal so deixa
+            # selecionar a linha inteira, dificultava copiar so o codigo do
+            # anuncio ou o numero da venda no marketplace.
+            st.data_editor(
                 detalhe[
                     [
-                        "numero_pedido", "canal", "codigo_pai", "sku", "anuncio_id",
+                        "numero_pedido", "numero_ecommerce", "canal", "codigo_pai", "sku", "anuncio_id",
                         "quantidade", "receita", "cmv", "perda", "sugestão",
                     ]
                 ].sort_values("perda", ascending=False),
                 hide_index=True,
                 use_container_width=True,
+                disabled=True,
+                key="editor_abaixo_custo",
                 column_config={
-                    "numero_pedido": "Pedido",
+                    "numero_pedido": "Pedido (Tiny)",
+                    "numero_ecommerce": "Nº da venda (marketplace)",
                     "canal": "Marketplace/conta",
                     "codigo_pai": "Código pai",
                     "anuncio_id": "Anúncio (ML)",
@@ -774,18 +783,11 @@ with aba_visao:
                 },
             )
             st.caption(
-                "Anúncio (ML) só aparece pra vendas do Mercado Livre processadas depois desse recurso existir - "
-                "em branco = ainda não capturado (não tem como o dashboard buscar isso ao vivo)."
+                "Clique numa célula (ex.: Anúncio ou Nº da venda) e Ctrl+C pra copiar só aquele valor. "
+                "'Nº da venda (marketplace)' e 'Anúncio (ML)' só aparecem pra vendas processadas depois "
+                "desses recursos existirem - em branco = ainda não capturado (não tem como o dashboard "
+                "buscar isso ao vivo)."
             )
-
-            com_anuncio = detalhe[detalhe["anuncio_id"].notna()].sort_values("perda", ascending=False)
-            if not com_anuncio.empty:
-                with st.expander(f"📋 Copiar código do anúncio ({len(com_anuncio)})"):
-                    st.caption("Clique no ícone que aparece ao passar o mouse pra copiar e colar direto na busca do Mercado Livre.")
-                    for _, linha in com_anuncio.iterrows():
-                        col_label, col_code = st.columns([2, 1])
-                        col_label.write(f"Pedido {linha['numero_pedido']} · SKU {linha['sku']}")
-                        col_code.code(linha["anuncio_id"], language=None)
     else:
         st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
 
