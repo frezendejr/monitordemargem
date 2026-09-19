@@ -51,6 +51,26 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.tiny.com.br/api2"
 
+_BRASILIA = timezone(timedelta(hours=-3))
+
+
+def _para_brasilia(dt: datetime) -> datetime:
+    """O Tiny espera dataAtualizacao/dataInicial/dataFinal em horario de
+    Brasilia (America/Sao_Paulo, sem horario de verao desde 2019), nao UTC.
+    monitor.py e monitor_cloud.py sempre guardam o checkpoint como
+    datetime.now(timezone.utc) - se mandar os digitos UTC pro Tiny sem
+    converter, o filtro passa a pedir "pedidos atualizados depois de um
+    horario que, em Brasilia, ainda nao chegou" (UTC esta 3h a frente).
+    Bug real confirmado em 2026-09-19: toda busca por checkpoint devolvia 0
+    pedidos, MESMO com pedido novo de verdade no Tiny - o relogio real
+    precisava andar as tais 3h pra alcancar o horario "futuro" gravado, daí
+    o ciclo so achava pedido de novo a cada ~3h em vez de a cada 15min.
+    So converte se vier com tzinfo - um datetime ja naive e assumido como
+    horario local (comportamento antigo, preservado)."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(_BRASILIA)
+    return dt
+
 
 class TinyApiError(RuntimeError):
     """Erro retornado pela API do Tiny (retorno.status != 'OK')."""
@@ -94,6 +114,7 @@ class TinyClient:
         (algumas contas so tem dataInicial/dataFinal), trocar aqui mantendo o
         contrato de retorno: lista de pedidos resumo com pelo menos `numero`.
         """
+        desde = _para_brasilia(desde)
         pedidos: list[dict] = []
         pagina = 1
         while True:
@@ -143,6 +164,8 @@ class TinyClient:
         o que foi CRIADO antes). O ciclo normal do monitor continua usando
         buscar_pedidos_atualizados_desde - esse metodo aqui e so pra tapar
         buraco de historico que o monitor nao tinha como ver."""
+        data_inicial = _para_brasilia(data_inicial)
+        data_final = _para_brasilia(data_final)
         pedidos: list[dict] = []
         pagina = 1
         while True:
