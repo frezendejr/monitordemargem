@@ -123,14 +123,26 @@ def recalcular_custo_pendente() -> int:
     headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     try:
-        resp = requests.get(
-            f"{url}/rest/v1/margin_monitor_itens",
-            params={"select": "conta_tiny,numero_pedido,sku", "custo_ausente": "eq.true", "limit": "5000"},
-            headers=headers,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        pendentes = resp.json()
+        # O Supabase tem um teto de 1000 linhas por resposta (db-max-rows) -
+        # ignora `limit` maior que isso. Pagina de verdade via Range (bug
+        # real, achado em 2026-09-19 no carregar_tabela do dashboard.py -
+        # mesma causa aqui: silenciosamente so pegava as 1000 primeiras
+        # linhas de custo_ausente=true, deixando o resto pra tras).
+        pendentes: list[dict] = []
+        inicio = 0
+        while True:
+            resp = requests.get(
+                f"{url}/rest/v1/margin_monitor_itens",
+                params={"select": "conta_tiny,numero_pedido,sku", "custo_ausente": "eq.true"},
+                headers={**headers, "Range": f"{inicio}-{inicio + _PAGINA - 1}"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            pagina = resp.json()
+            pendentes.extend(pagina)
+            if len(pagina) < _PAGINA:
+                break
+            inicio += _PAGINA
         if not pendentes:
             return 0
 

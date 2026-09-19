@@ -43,18 +43,38 @@ def _config(chave: str) -> str:
     return os.environ[chave]
 
 
+_PAGINA_SUPABASE = 1000
+
+
 @st.cache_data(ttl=120)
 def carregar_tabela(nome: str) -> pd.DataFrame:
+    """O Supabase tem um teto de 1000 linhas por resposta (db-max-rows) -
+    ignora qualquer `limit` maior pedido na query. Passar so `limit=20000`
+    sem paginar (bug real, achado em 2026-09-19: a tabela ja tinha milhares
+    de pedidos por causa dos backfills, e o dashboard so via as 1000
+    ULTIMAS gravadas - cortava praticamente todo o historico mais antigo).
+    Pagina de verdade via Range ate a pagina vir incompleta."""
     url = _config("SUPABASE_URL").rstrip("/")
     key = _config("SUPABASE_ANON_KEY")
-    resp = requests.get(
-        f"{url}/rest/v1/{nome}",
-        headers={"apikey": key, "Authorization": f"Bearer {key}"},
-        params={"select": "*", "order": "processado_em.desc", "limit": "20000"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return pd.DataFrame(resp.json())
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+
+    linhas: list[dict] = []
+    inicio = 0
+    while True:
+        resp = requests.get(
+            f"{url}/rest/v1/{nome}",
+            headers={**headers, "Range": f"{inicio}-{inicio + _PAGINA_SUPABASE - 1}"},
+            params={"select": "*", "order": "processado_em.desc"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        pagina = resp.json()
+        linhas.extend(pagina)
+        if len(pagina) < _PAGINA_SUPABASE:
+            break
+        inicio += _PAGINA_SUPABASE
+
+    return pd.DataFrame(linhas)
 
 
 def _codigo_pai(sku: str) -> str:
