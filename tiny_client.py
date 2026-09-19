@@ -119,6 +119,39 @@ class TinyClient:
 
         return pedidos
 
+    def buscar_pedidos_no_intervalo(self, data_inicial: datetime, data_final: datetime) -> list[dict]:
+        """Lista pedidos por DATA DE CRIACAO (dataInicial/dataFinal, formato
+        DD/MM/AAAA) - diferente de buscar_pedidos_atualizados_desde (que e
+        por dataAtualizacao). So serve pra BACKFILL historico: um pedido ja
+        entregue, sem nenhuma atualizacao de status recente, nunca aparece
+        via dataAtualizacao (confirmado real: pedidos de 01/09 sumiam do
+        monitor porque o 1o ciclo so rodou em 17/09 - o filtro por
+        atualizacao so pega o que mudou nas ultimas 24h daquele momento, nao
+        o que foi CRIADO antes). O ciclo normal do monitor continua usando
+        buscar_pedidos_atualizados_desde - esse metodo aqui e so pra tapar
+        buraco de historico que o monitor nao tinha como ver."""
+        pedidos: list[dict] = []
+        pagina = 1
+        while True:
+            retorno = self._post(
+                "pedidos.pesquisa.php",
+                {
+                    "dataInicial": data_inicial.strftime("%d/%m/%Y"),
+                    "dataFinal": data_final.strftime("%d/%m/%Y"),
+                    "pagina": pagina,
+                },
+            )
+            lote = [p["pedido"] for p in retorno.get("pedidos", [])]
+            lote = [p for p in lote if p.get("situacao") != "Cancelado"]
+            pedidos.extend(lote)
+
+            numero_paginas = int(retorno.get("numero_paginas", 1))
+            if pagina >= numero_paginas or not lote:
+                break
+            pagina += 1
+
+        return pedidos
+
     def obter_pedido_completo(self, numero_ou_id: str) -> dict:
         retorno = self._post("pedido.obter.php", {"id": numero_ou_id})
         return retorno["pedido"]
