@@ -777,6 +777,15 @@ with aba_visao:
                 "Anúncio (ML) só aparece pra vendas do Mercado Livre processadas depois desse recurso existir - "
                 "em branco = ainda não capturado (não tem como o dashboard buscar isso ao vivo)."
             )
+
+            com_anuncio = detalhe[detalhe["anuncio_id"].notna()].sort_values("perda", ascending=False)
+            if not com_anuncio.empty:
+                with st.expander(f"📋 Copiar código do anúncio ({len(com_anuncio)})"):
+                    st.caption("Clique no ícone que aparece ao passar o mouse pra copiar e colar direto na busca do Mercado Livre.")
+                    for _, linha in com_anuncio.iterrows():
+                        col_label, col_code = st.columns([2, 1])
+                        col_label.write(f"Pedido {linha['numero_pedido']} · SKU {linha['sku']}")
+                        col_code.code(linha["anuncio_id"], language=None)
     else:
         st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
 
