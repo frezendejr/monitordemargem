@@ -228,6 +228,23 @@ class MLClient:
             raise MLApiError(f"Falha ao obter pagamento {payment_id}: {resp.status_code} {resp.text}")
         return resp.json()
 
+    def obter_pack(self, pack_id: str) -> dict:
+        """Um "pack" agrupa varios `orders` do ML que saem no mesmo envio
+        (compra combinada) - a Tiny as vezes guarda o pack_id em
+        numero_ecommerce em vez do order_id de verdade, e /orders/{id} da
+        404 pra esse numero (confirmado: pack 2000015106907205 continha o
+        order real 2000018537732164, total R$59,99 - batia exato com o
+        total_pedido ja gravado)."""
+        access_token = self._access_token_valido()
+        resp = requests.get(
+            f"{BASE_URL}/packs/{pack_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter pack {pack_id}: {resp.status_code} {resp.text}")
+        return resp.json()
+
     def obter_envio(self, shipping_id: str) -> dict:
         """Detalhe do envio (Mercado Envios) - onde o frete REAL cobrado do
         vendedor aparece em shipping_option.list_cost (confirmado contra o
@@ -267,22 +284,35 @@ class MLClient:
           o pedido nao tiver envio (retirada em loja, etc.) ou a chamada
           falhar, cai pro calculo por diferenca
           (valor_venda - comissao_real - receita_liquida) como aproximacao.
+
+        Se `ml_order_id` na verdade for um pack_id (a Tiny guarda isso em
+        numero_ecommerce pra algumas compras combinadas - /orders/{id} da
+        404 "Order do not exists" nesse caso), busca /packs/{id} e soma os
+        `orders` de dentro dele em vez de um pedido so.
         """
-        pedido_ml = self.obter_pedido(ml_order_id)
-        itens = pedido_ml.get("order_items", [])
+        try:
+            pedidos_ml = [self.obter_pedido(ml_order_id)]
+        except MLApiError:
+            pack = self.obter_pack(ml_order_id)
+            pedidos_ml = [self.obter_pedido(str(o["id"])) for o in pack.get("orders", [])]
 
-        valor_venda = sum(item["unit_price"] * item["quantity"] for item in itens)
-        comissao_real = sum(item.get("sale_fee") or 0.0 for item in itens)
-
+        valor_venda = 0.0
+        comissao_real = 0.0
         receita_liquida = 0.0
-        for pagamento_resumo in pedido_ml.get("payments", []):
-            if pagamento_resumo.get("status") != "approved":
-                continue
-            pagamento = self.obter_pagamento(str(pagamento_resumo["id"]))
-            receita_liquida += pagamento["transaction_details"]["net_received_amount"]
+        shipping_id = None
+        for pedido_ml in pedidos_ml:
+            itens = pedido_ml.get("order_items", [])
+            valor_venda += sum(item["unit_price"] * item["quantity"] for item in itens)
+            comissao_real += sum(item.get("sale_fee") or 0.0 for item in itens)
+            for pagamento_resumo in pedido_ml.get("payments", []):
+                if pagamento_resumo.get("status") != "approved":
+                    continue
+                pagamento = self.obter_pagamento(str(pagamento_resumo["id"]))
+                receita_liquida += pagamento["transaction_details"]["net_received_amount"]
+            if shipping_id is None:
+                shipping_id = (pedido_ml.get("shipping") or {}).get("id")
 
         frete_real = round(valor_venda - comissao_real - receita_liquida, 2)
-        shipping_id = (pedido_ml.get("shipping") or {}).get("id")
         if shipping_id:
             try:
                 envio = self.obter_envio(str(shipping_id))
