@@ -64,10 +64,11 @@ def enviar_pedido(conta_tiny: str, resultado: ResultadoMargem, alertado: bool, v
         raise SupabaseError(f"Falha ao gravar pedido no Supabase: {resp.status_code} {resp.text}")
 
 
-def enviar_itens(conta_tiny: str, resultado: ResultadoMargem) -> None:
+def enviar_itens(conta_tiny: str, resultado: ResultadoMargem, anuncios: dict[str, str] | None = None) -> None:
     if not resultado.itens:
         return
 
+    anuncios = anuncios or {}
     payload = [
         {
             "conta_tiny": conta_tiny,
@@ -81,6 +82,7 @@ def enviar_itens(conta_tiny: str, resultado: ResultadoMargem) -> None:
             "margem_contribuicao": item.margem_contribuicao,
             "margem_pct": item.margem_pct,
             "custo_ausente": item.custo_ausente,
+            "anuncio_id": anuncios.get(item.sku),
         }
         for item in resultado.itens
     ]

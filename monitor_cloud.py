@@ -168,7 +168,7 @@ def processar_conta(conta_tiny: str, cliente: TinyClient, canais_config: dict, c
 
         try:
             supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar, valor_venda=valor_venda)
-            supabase_writer.enviar_itens(conta_tiny, resultado)
+            supabase_writer.enviar_itens(conta_tiny, resultado, anuncios=detalhe_ml.anuncios if detalhe_ml else None)
         except supabase_writer.SupabaseError:
             # Diferente do monitor.py local: aqui o Supabase E o dedupe (nao
             # tem SQLite de apoio), entao uma falha aqui significa que esse

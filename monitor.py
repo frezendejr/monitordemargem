@@ -211,7 +211,7 @@ def processar_ciclo_conta(
 
         try:
             supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar, valor_venda=valor_venda)
-            supabase_writer.enviar_itens(conta_tiny, resultado)
+            supabase_writer.enviar_itens(conta_tiny, resultado, anuncios=detalhe_ml.anuncios if detalhe_ml else None)
         except (supabase_writer.SupabaseError, KeyError):
             # So alimenta o dashboard - nunca pode travar o monitor. O
             # SQLite local (fonte de verdade operacional) ja foi salvo acima.

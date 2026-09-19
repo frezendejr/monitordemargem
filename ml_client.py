@@ -44,6 +44,7 @@ class DetalheFinanceiroPedido:
     valor_venda: float
     comissao_real: float
     frete_real: float
+    anuncios: dict[str, str] = None  # seller_sku -> id do anuncio (ex.: "MLB2048260121")
 
 BASE_URL = "https://api.mercadolibre.com"
 MP_BASE_URL = "https://api.mercadopago.com"
@@ -300,10 +301,17 @@ class MLClient:
         comissao_real = 0.0
         receita_liquida = 0.0
         shipping_id = None
+        anuncios: dict[str, str] = {}
         for pedido_ml in pedidos_ml:
             itens = pedido_ml.get("order_items", [])
             valor_venda += sum(item["unit_price"] * item["quantity"] for item in itens)
             comissao_real += sum(item.get("sale_fee") or 0.0 for item in itens)
+            for order_item in itens:
+                item_info = order_item.get("item") or {}
+                seller_sku = item_info.get("seller_sku")
+                anuncio_id = item_info.get("id")
+                if seller_sku and anuncio_id:
+                    anuncios[str(seller_sku)] = str(anuncio_id)
             for pagamento_resumo in pedido_ml.get("payments", []):
                 if pagamento_resumo.get("status") != "approved":
                     continue
@@ -332,6 +340,7 @@ class MLClient:
             valor_venda=round(valor_venda, 2),
             comissao_real=round(comissao_real, 2),
             frete_real=frete_real,
+            anuncios=anuncios,
         )
 
 

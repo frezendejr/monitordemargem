@@ -379,8 +379,13 @@ with aba_visao:
     faturamento_real = pedidos_periodo_empresa["receita"].sum()
     margem_real = pedidos_periodo_empresa["margem_contribuicao"].sum()
 
+    itens_com_custo = itens_f[itens_f["custo_ausente"] == False]  # noqa: E712
+    receita_com_custo = itens_com_custo["receita"].sum()
+    margem_com_custo = itens_com_custo["margem_contribuicao"].sum()
+    margem_pct_media = (margem_com_custo / receita_com_custo * 100) if receita_com_custo else 0
+
     with st.container(border=True):
-        st.caption("Faturamento e margem SEMPRE somam todas as contas/canais, independente do filtro ao lado.")
+        st.caption("Faturamento e margem (com meta) SEMPRE somam todas as contas/canais, independente do filtro ao lado.")
         cm1, cm2 = st.columns(2)
         cm1.metric("Faturamento", _fmt_moeda(faturamento_real))
         cm2.metric(
@@ -397,6 +402,20 @@ with aba_visao:
         )
         if meta_incompleta:
             st.caption("⚠️ Algum mês do período selecionado ainda não tem meta cadastrada acima.")
+
+        st.divider()
+
+        c1, c2 = st.columns(2)
+        c1.metric("Pedidos", f"{len(pedidos_f):,}".replace(",", "."))
+        c2.metric("Receita total", _fmt_moeda(pedidos_f["receita"].sum()))
+
+        c3, c4 = st.columns(2)
+        c3.metric("Margem total", _fmt_moeda(pedidos_f["margem_contribuicao"].sum()))
+        c4.metric("Margem % (só c/ custo)", f"{margem_pct_media:.1f}%")
+
+        c5, c6 = st.columns(2)
+        c5.metric("Pedidos com margem negativa", int((pedidos_f["margem_contribuicao"] < 0).sum()))
+        c6.metric("Pedidos com custo ausente", int((pedidos_f["custo_ausente"] == True).sum()))  # noqa: E712
 
     # -- Vendas abaixo do custo (alerta) -----------------------------------
     abaixo_custo = itens_f[
@@ -430,53 +449,61 @@ with aba_visao:
             st.session_state["mostrar_abaixo_custo"] = not st.session_state.get("mostrar_abaixo_custo", False)
 
         if st.session_state.get("mostrar_abaixo_custo"):
+            # Referencia de custo "correto" do codigo pai: a moda do custo
+            # unitario entre TODOS os irmaos (nao so o periodo filtrado) -
+            # se essa venda diverge dessa referencia, o problema e o CUSTO
+            # cadastrado (provavel erro de digitacao); se bate com a
+            # referencia, o custo esta certo e o problema e o PRECO de venda.
+            itens_ref = itens.copy()
+            itens_ref["codigo_pai"] = itens_ref["sku"].map(_codigo_pai)
+            itens_ref["custo_unitario"] = itens_ref["cmv"] / itens_ref["quantidade"].replace(0, pd.NA)
+            custo_referencia = itens_ref.groupby("codigo_pai")["custo_unitario"].agg(
+                lambda s: s.mode().iloc[0] if not s.mode().empty else s.median()
+            )
+
             detalhe = abaixo_custo.copy()
             detalhe["codigo_pai"] = detalhe["sku"].map(_codigo_pai)
-            detalhe["perda_por_unidade"] = detalhe["cmv"] - detalhe["receita"]
-            resumo_abaixo_custo = (
-                detalhe.groupby(["canal", "codigo_pai", "sku"])
-                .agg(
-                    quantidade=("quantidade", "sum"),
-                    receita=("receita", "sum"),
-                    cmv=("cmv", "sum"),
-                    perda=("perda_por_unidade", "sum"),
-                    pedidos=("numero_pedido", "nunique"),
-                )
-                .reset_index()
-                .sort_values("perda", ascending=False)
-            )
+            detalhe["custo_unitario"] = detalhe["cmv"] / detalhe["quantidade"].replace(0, pd.NA)
+            detalhe["custo_referencia"] = detalhe["codigo_pai"].map(custo_referencia)
+            detalhe["perda"] = detalhe["cmv"] - detalhe["receita"]
+            if "anuncio_id" not in detalhe.columns:
+                detalhe["anuncio_id"] = None
+
+            def _sugestao(row) -> str:
+                if pd.notna(row["custo_referencia"]) and abs(row["custo_unitario"] - row["custo_referencia"]) > 0.01:
+                    return (
+                        f"⚠️ Revisar CUSTO cadastrado - diverge dos irmãos "
+                        f"(R$ {row['custo_unitario']:.2f} vs R$ {row['custo_referencia']:.2f} do grupo)"
+                    )
+                return "💲 Revisar PREÇO de venda ou pausar anúncio - custo cadastrado bate com os irmãos"
+
+            detalhe["sugestão"] = detalhe.apply(_sugestao, axis=1)
+
             st.dataframe(
-                resumo_abaixo_custo,
+                detalhe[
+                    [
+                        "numero_pedido", "canal", "codigo_pai", "sku", "anuncio_id",
+                        "quantidade", "receita", "cmv", "perda", "sugestão",
+                    ]
+                ].sort_values("perda", ascending=False),
                 hide_index=True,
                 use_container_width=True,
                 column_config={
+                    "numero_pedido": "Pedido",
                     "canal": "Marketplace/conta",
                     "codigo_pai": "Código pai",
+                    "anuncio_id": "Anúncio (ML)",
                     "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
                     "cmv": st.column_config.NumberColumn("CMV", format="R$ %.2f"),
                     "perda": st.column_config.NumberColumn("Perda (CMV − receita)", format="R$ %.2f"),
                 },
             )
+            st.caption(
+                "Anúncio (ML) só aparece pra vendas do Mercado Livre processadas depois desse recurso existir - "
+                "em branco = ainda não capturado (não tem como o dashboard buscar isso ao vivo)."
+            )
     else:
         st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
-
-    with st.container(border=True):
-        c1, c2 = st.columns(2)
-        c1.metric("Pedidos", f"{len(pedidos_f):,}".replace(",", "."))
-        c2.metric("Receita total", _fmt_moeda(pedidos_f["receita"].sum()))
-
-        c3, c4 = st.columns(2)
-        c3.metric("Margem total", _fmt_moeda(pedidos_f["margem_contribuicao"].sum()))
-
-        itens_com_custo = itens_f[itens_f["custo_ausente"] == False]  # noqa: E712
-        receita_com_custo = itens_com_custo["receita"].sum()
-        margem_com_custo = itens_com_custo["margem_contribuicao"].sum()
-        margem_pct_media = (margem_com_custo / receita_com_custo * 100) if receita_com_custo else 0
-        c4.metric("Margem % (só c/ custo)", f"{margem_pct_media:.1f}%")
-
-        c5, c6 = st.columns(2)
-        c5.metric("Pedidos com margem negativa", int((pedidos_f["margem_contribuicao"] < 0).sum()))
-        c6.metric("Pedidos com custo ausente", int((pedidos_f["custo_ausente"] == True).sum()))  # noqa: E712
 
     st.subheader("Margem por canal")
     por_canal = (
