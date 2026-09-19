@@ -208,6 +208,23 @@ def calcular_indices_por_canal(pedidos_hist: pd.DataFrame, canais: list[str], ja
     }
 
 
+def calcular_mix_canal(pedidos_hist: pd.DataFrame, canais: list[str], janela_dias: int = 90) -> dict[str, float]:
+    """Participação (0 a 1) de cada canal no faturamento dos últimos
+    `janela_dias` - usado só pra PRE-PREENCHER a meta por canal a partir de
+    1 meta total (ponto de partida a partir do histórico real de vendas);
+    o time ainda pode ajustar linha a linha depois pra refletir decisão
+    estratégica (ex.: crescer um canal de propósito)."""
+    limite = pd.Timestamp(date.today() - timedelta(days=janela_dias))
+    hist = pedidos_hist[(pedidos_hist["data_pedido_dt"] >= limite) & (pedidos_hist["canal"].isin(canais))]
+    if hist.empty:
+        return {canal: 1 / len(canais) for canal in canais} if canais else {}
+    por_canal = hist.groupby("canal")["valor_venda_efetivo"].sum()
+    total = por_canal.sum()
+    if not total:
+        return {canal: 1 / len(canais) for canal in canais} if canais else {}
+    return {canal: por_canal.get(canal, 0.0) / total for canal in canais}
+
+
 def _dias_do_mes(mes: date) -> list[date]:
     proximo = date(mes.year + 1, 1, 1) if mes.month == 12 else date(mes.year, mes.month + 1, 1)
     dias, d = [], mes
@@ -522,22 +539,46 @@ with aba_visao:
             "Configurar meta de qual mês?", value=date.today().replace(day=1), format="DD/MM/YYYY", key="mes_config_visao"
         ).replace(day=1)
         metas_existentes = metas_por_mes.get(mes_config, {})
+        chave_autofill = f"metas_autofill_{mes_config.isoformat()}"
 
+        st.markdown("**Preencher a partir de 1 meta total** (opcional - divide pelo mix histórico de canal dos últimos 90 dias)")
+        ct1, ct2, ct3, ct4 = st.columns([2, 2, 1.5, 1.5])
+        meta_total_input = ct1.number_input("Meta TOTAL do mês (R$)", min_value=0.0, step=1000.0, key=f"meta_total_{mes_config}")
+        hiper_total_input = ct2.number_input("Hiper Meta TOTAL (R$)", min_value=0.0, step=1000.0, key=f"hiper_total_{mes_config}")
+        margem_geral_input = ct3.number_input(
+            "Margem geral (%)", min_value=0.0, max_value=100.0, step=0.5, value=15.0, key=f"margem_geral_{mes_config}"
+        )
+        ct4.write("")
+        ct4.write("")
+        if ct4.button("🔄 Dividir por canal"):
+            mix = calcular_mix_canal(pedidos, canais_todos)
+            st.session_state[chave_autofill] = {
+                canal: {
+                    "meta_faturamento": round(meta_total_input * mix.get(canal, 0.0), 2),
+                    "hiper_meta_faturamento": round(hiper_total_input * mix.get(canal, 0.0), 2),
+                    "meta_margem_pct": margem_geral_input,
+                }
+                for canal in canais_todos
+            }
+            st.rerun()
+
+        fonte_metas = st.session_state.get(chave_autofill) or metas_existentes
         tabela_metas = pd.DataFrame(
             [
                 {
                     "canal": canal,
-                    "meta_faturamento": float(metas_existentes.get(canal, {}).get("meta_faturamento") or 0.0),
-                    "hiper_meta_faturamento": float(metas_existentes.get(canal, {}).get("hiper_meta_faturamento") or 0.0),
-                    "meta_margem_pct": float(metas_existentes.get(canal, {}).get("meta_margem_pct") or 15.0),
+                    "meta_faturamento": float(fonte_metas.get(canal, {}).get("meta_faturamento") or 0.0),
+                    "hiper_meta_faturamento": float(fonte_metas.get(canal, {}).get("hiper_meta_faturamento") or 0.0),
+                    "meta_margem_pct": float(fonte_metas.get(canal, {}).get("meta_margem_pct") or 15.0),
                 }
                 for canal in canais_todos
             ]
         )
         st.caption(
-            "Meta por canal é decisão do time (ex.: crescer um marketplace de propósito) - a divisão por "
-            "DIA dentro do mês é automática, proporcional a como cada canal costuma vender por dia da "
-            "semana (últimos 90 dias)."
+            "'Dividir por canal' usa o histórico só como PONTO DE PARTIDA - ajuste linha a linha se quiser "
+            "crescer/reduzir algum canal de propósito antes de salvar. A divisão por DIA dentro do mês "
+            "(dentro de cada canal) é sempre automática, proporcional a como aquele canal costuma vender "
+            "por dia da semana."
         )
         metas_editadas = st.data_editor(
             tabela_metas,
@@ -555,6 +596,7 @@ with aba_visao:
             try:
                 registros = metas_editadas.to_dict("records")
                 salvar_metas_canal(mes_config, registros)
+                st.session_state.pop(chave_autofill, None)
                 st.success(f"Metas de {mes_config.strftime('%m/%Y')} salvas ({len(registros)} canal(is)).")
                 st.rerun()
             except Exception as e:
