@@ -206,27 +206,54 @@ def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, tit
     return base.mark_arc(outerRadius=160).properties(height=420)
 
 
-def _injetar_css_kpi():
-    """CSS dos cartoes de indicador (._kpi_card) - verde quando o numero e
-    bom, vermelho piscando quando e ruim (mesmo padrao visual do alerta de
-    "vendas abaixo do custo", so que com uma keyframe propria pra nao
-    depender daquele bloco só existir quando ha alerta)."""
+_GOLD = "#D9B559"
+_GOLD_SOFT = "#8A7434"
+_VERDE = "#3FBF6F"
+_VERMELHO = "#E5484D"
+
+
+def _injetar_tema_amo():
+    """Skin preto/dourado do Grupo Amo por cima do tema 'dark' base do
+    Streamlit (.streamlit/config.toml) - fontes (Baloo 2 pros títulos/
+    números grandes, Manrope pro resto) + cartões de indicador (._kpi_card,
+    verde quando o número é bom, vermelho piscando quando é ruim - mesmo
+    padrão do alerta de "vendas abaixo do custo") + acento dourado nas
+    abas. So cor/tipografia/polimento visual - layout e estrutura das
+    telas continuam os mesmos."""
     st.markdown(
-        """
+        f"""
         <style>
-        .kpi-card {
-            border-radius: 10px; padding: 14px 16px; margin-bottom: 8px;
-            border: 1px solid rgba(49, 51, 63, 0.1); height: 100%;
-        }
-        .kpi-title { font-size: 0.80rem; font-weight: 600; opacity: 0.75; margin-bottom: 4px; }
-        .kpi-value { font-size: 1.65rem; font-weight: 700; line-height: 1.15; }
-        .kpi-sub { font-size: 0.78rem; margin-top: 4px; opacity: 0.9; }
-        .kpi-neutral { background-color: rgba(120, 130, 140, 0.08); }
-        .kpi-green { background-color: rgba(30, 126, 52, 0.12); }
-        .kpi-green .kpi-value, .kpi-green .kpi-sub { color: #1e7e34; }
-        .kpi-red-blink { background-color: rgba(211, 47, 47, 0.12); animation: kpi_piscar 1.1s infinite; }
-        .kpi-red-blink .kpi-value, .kpi-red-blink .kpi-sub { color: #c62828; }
-        @keyframes kpi_piscar { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+        @import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&family=Manrope:wght@400;500;600;700&display=swap');
+        html, body, [class*="css"] {{ font-family: "Manrope", ui-sans-serif, system-ui, sans-serif; }}
+        h1, h2, h3 {{ font-family: "Baloo 2", "Manrope", sans-serif !important; }}
+
+        [data-testid="stAppViewContainer"] {{
+            background-image:
+                radial-gradient(circle at 10% 0%, rgba(217,181,89,0.06), transparent 40%),
+                radial-gradient(circle at 100% 100%, rgba(217,181,89,0.05), transparent 45%);
+        }}
+
+        .stTabs [data-baseweb="tab-list"] {{ gap: 4px; }}
+        .stTabs [aria-selected="true"] {{ color: {_GOLD} !important; }}
+        .stTabs [data-baseweb="tab-highlight"] {{ background-color: {_GOLD} !important; }}
+
+        .kpi-card {{
+            border-radius: 14px; padding: 14px 16px; margin-bottom: 8px;
+            border: 1px solid rgba(217, 181, 89, 0.18); height: 100%;
+            background-color: rgba(255, 255, 255, 0.02);
+        }}
+        .kpi-title {{ font-size: 0.80rem; font-weight: 600; opacity: 0.6; margin-bottom: 4px; }}
+        .kpi-value {{ font-family: "Baloo 2", sans-serif; font-size: 1.7rem; font-weight: 700; line-height: 1.15; }}
+        .kpi-sub {{ font-size: 0.78rem; margin-top: 4px; opacity: 0.9; }}
+        .kpi-neutral .kpi-value {{ color: {_GOLD}; }}
+        .kpi-green {{ background-color: rgba(63, 191, 111, 0.12); border-color: rgba(63, 191, 111, 0.35); }}
+        .kpi-green .kpi-value, .kpi-green .kpi-sub {{ color: {_VERDE}; }}
+        .kpi-red-blink {{
+            background-color: rgba(229, 72, 77, 0.12); border-color: rgba(229, 72, 77, 0.4);
+            animation: kpi_piscar 1.1s infinite;
+        }}
+        .kpi-red-blink .kpi-value, .kpi-red-blink .kpi-sub {{ color: {_VERMELHO}; }}
+        @keyframes kpi_piscar {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.55; }} }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -556,6 +583,7 @@ def montar_relatorio_diario(
     return pd.DataFrame(linhas)
 
 
+_injetar_tema_amo()
 st.title("📊 Margem de contribuição — Grupo Amo")
 
 _LIMIAR_ATRASO_MIN = 20  # ciclo roda a cada 15min "de calendario" - ver monitor.yml
@@ -811,8 +839,6 @@ with aba_visao:
     receita_com_custo = itens_com_custo["receita"].sum()
     margem_com_custo = itens_com_custo["margem_contribuicao"].sum()
     margem_pct_media = (margem_com_custo / receita_com_custo * 100) if receita_com_custo else 0
-
-    _injetar_css_kpi()
 
     mes_corrente = date.today().replace(day=1)
     projecao_fat_mes, pct_projecao_fat_meta = calcular_projecao_mes(
