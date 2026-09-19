@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 import storage_supabase as storage
 import supabase_writer
 from alerts import enviar_email, enviar_whatsapp, montar_mensagem_alerta
+from categoria_produto import recalcular_categoria_pendente
 from custo_planilha import recalcular_custo_pendente, sobrepor_custos_do_dashboard
 from margin_engine import calcular_margem
 from ml_client import MLApiError, MLClient
@@ -205,6 +206,10 @@ def main():
     n_corrigidos = recalcular_custo_pendente()
     if n_corrigidos:
         logger.info("Custo pendente preenchido no dashboard: %d item(ns) recalculado(s)", n_corrigidos)
+
+    n_categorias = recalcular_categoria_pendente()
+    if n_categorias:
+        logger.info("Categoria de produto classificada via API do Meli: %d codigo(s) pai", n_categorias)
 
     total = 0
     for conta_tiny, conta_cfg in config["tiny_contas"].items():

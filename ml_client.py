@@ -262,6 +262,31 @@ class MLClient:
             raise MLApiError(f"Falha ao obter envio {shipping_id}: {resp.status_code} {resp.text}")
         return resp.json()
 
+    def obter_item(self, item_id: str) -> dict:
+        """Detalhe do anuncio (MLB...) - usado so pra pegar category_id.
+        Precisa de token (o endpoint bloqueia acesso anonimo com 403
+        "PA_UNAUTHORIZED_RESULT_FROM_POLICIES", confirmado real em
+        2026-09-19), e precisa ser o token da MESMA subconta dona do
+        anuncio - usar token de outra subconta Meli tambem da 403."""
+        access_token = self._access_token_valido()
+        resp = requests.get(
+            f"{BASE_URL}/items/{item_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"attributes": "id,category_id"},
+            timeout=15,
+        )
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter item {item_id}: {resp.status_code} {resp.text}")
+        return resp.json()
+
+    def obter_categoria(self, category_id: str) -> dict:
+        """Detalhe da categoria (nome + path_from_root, a hierarquia
+        completa) - endpoint publico do Meli, nao precisa de token."""
+        resp = requests.get(f"{BASE_URL}/categories/{category_id}", timeout=15)
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter categoria {category_id}: {resp.status_code} {resp.text}")
+        return resp.json()
+
     def obter_receita_liquida_pedido(self, ml_order_id: str) -> float:
         """Soma o net_received_amount de todos os pagamentos aprovados do
         pedido - o valor que a Amo efetivamente recebe, ja liquido de

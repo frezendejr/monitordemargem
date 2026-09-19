@@ -78,6 +78,38 @@ def carregar_tabela(nome: str) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+SEM_CATEGORIA = "Sem categoria"
+
+
+@st.cache_data(ttl=120)
+def carregar_categorias_produto() -> dict[str, str]:
+    """{codigo_pai: categoria} - margin_monitor_categorias e escrita so
+    pelo backend (recalcular_categoria_pendente, via API do Meli), o
+    dashboard so le. Nao usa carregar_tabela porque essa tabela nao tem
+    coluna processado_em (usa atualizado_em)."""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+
+    categorias: dict[str, str] = {}
+    inicio = 0
+    while True:
+        resp = requests.get(
+            f"{url}/rest/v1/margin_monitor_categorias",
+            headers={**headers, "Range": f"{inicio}-{inicio + _PAGINA_SUPABASE - 1}"},
+            params={"select": "codigo_pai,categoria"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        pagina = resp.json()
+        categorias.update({r["codigo_pai"]: r["categoria"] for r in pagina})
+        if len(pagina) < _PAGINA_SUPABASE:
+            break
+        inicio += _PAGINA_SUPABASE
+
+    return categorias
+
+
 def _codigo_pai(sku: str) -> str:
     """Convencao Amo Shoes: SKU = codigo_pai (N digitos) + tamanho (2
     digitos) - confirmado contra dado real (SKU 916039 = "Tamanho: 39" no
@@ -1070,6 +1102,62 @@ with aba_visao:
         column_config={
             "marketplace": "Marketplace",
             "conta": "Conta",
+            "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+            "margem": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
+            "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
+            "pedidos": "Pedidos",
+        },
+    )
+
+    st.subheader("Faturamento e margem por categoria de produto")
+    try:
+        categorias_produto = carregar_categorias_produto()
+    except Exception:
+        categorias_produto = {}
+        st.caption(
+            "⚪ Categoria ainda não disponível - falta rodar supabase_schema_categorias.sql no Supabase."
+        )
+
+    itens_f_cat = itens_f.copy()
+    itens_f_cat["codigo_pai"] = itens_f_cat["sku"].map(_codigo_pai)
+    itens_f_cat["categoria"] = itens_f_cat["codigo_pai"].map(categorias_produto).fillna(SEM_CATEGORIA)
+    por_categoria = (
+        itens_f_cat.groupby("categoria")
+        .agg(receita=("receita", "sum"), margem=("margem_contribuicao", "sum"), pedidos=("numero_pedido", "nunique"))
+        .reset_index()
+    )
+    por_categoria["margem_pct"] = (por_categoria["margem"] / por_categoria["receita"] * 100).round(1)
+    por_categoria = por_categoria.sort_values("margem", ascending=False)
+    por_categoria["margem_abs"] = por_categoria["margem"].abs()
+    escala_cat = _cores_para_categorias(por_categoria["categoria"].tolist())
+
+    pc3, pc4 = st.columns(2)
+    with pc3:
+        st.markdown("##### 💰 Faturamento por Categoria")
+        st.altair_chart(
+            _grafico_pizza(por_categoria, "categoria", "receita", "Categoria", cores=escala_cat),
+            use_container_width=True,
+        )
+    with pc4:
+        st.markdown("##### 📊 Margem por Categoria")
+        st.altair_chart(
+            _grafico_pizza(por_categoria, "categoria", "margem_abs", "Categoria", cores=escala_cat),
+            use_container_width=True,
+        )
+        st.caption(
+            "Tamanho da fatia = valor absoluto (margem negativa também vira fatia) - passe o mouse ou "
+            "veja a tabela abaixo pro sinal real."
+        )
+    st.caption(
+        f'"{SEM_CATEGORIA}" = produto que ainda não vendeu pelo Mercado Livre (única fonte da categoria, '
+        "via API) ou que ainda não foi classificado nesse ciclo."
+    )
+    st.dataframe(
+        por_categoria[["categoria", "receita", "margem", "margem_pct", "pedidos"]],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "categoria": "Categoria",
             "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
             "margem": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
             "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
