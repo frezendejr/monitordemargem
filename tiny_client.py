@@ -105,6 +105,11 @@ class TinyClient:
                 },
             )
             lote = [p["pedido"] for p in retorno.get("pedidos", [])]
+            # Pedido cancelado nao e venda - nunca deve entrar no calculo de
+            # receita/margem. Confirmado real: 6 pedidos Shopee cancelados
+            # num unico dia inflavam a receita do canal em ~R$442 (achado
+            # comparando contra a planilha de metas do time, 2026-09-19).
+            lote = [p for p in lote if p.get("situacao") != "Cancelado"]
             pedidos.extend(lote)
 
             numero_paginas = int(retorno.get("numero_paginas", 1))
