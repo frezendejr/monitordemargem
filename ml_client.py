@@ -228,6 +228,22 @@ class MLClient:
             raise MLApiError(f"Falha ao obter pagamento {payment_id}: {resp.status_code} {resp.text}")
         return resp.json()
 
+    def obter_envio(self, shipping_id: str) -> dict:
+        """Detalhe do envio (Mercado Envios) - onde o frete REAL cobrado do
+        vendedor aparece em shipping_option.list_cost (confirmado contra o
+        pedido real 2000018537926936: list_cost=27.05, extrato mostrava
+        "Envios: -R$27,05" - o campo `cost` e o que o COMPRADOR pagou, quase
+        sempre 0 em frete gratis, nao serve pra isso)."""
+        access_token = self._access_token_valido()
+        resp = requests.get(
+            f"{BASE_URL}/shipments/{shipping_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter envio {shipping_id}: {resp.status_code} {resp.text}")
+        return resp.json()
+
     def obter_receita_liquida_pedido(self, ml_order_id: str) -> float:
         """Soma o net_received_amount de todos os pagamentos aprovados do
         pedido - o valor que a Amo efetivamente recebe, ja liquido de
@@ -244,11 +260,13 @@ class MLClient:
           2000018537926936: sale_fee=47.50, extrato mostrava -R$47,50).
         - receita_liquida: soma do net_received_amount dos pagamentos
           aprovados - o que a Amo recebe de fato.
-        - frete_real: valor_venda - comissao_real - receita_liquida. A API
-          do ML nao expoe o frete cobrado do vendedor como campo separado
-          (so via endpoint de shipment) - mas esse resto bate exatamente com
-          "Envios" do extrato no mesmo pedido real (R$27,05). Pode incluir
-          ajustes raros (ex.: reembolso parcial) que nao sejam frete puro.
+        - frete_real: shipping_option.list_cost do envio (endpoint
+          /shipments/{id}, via `shipping.id` do pedido) - confirmado que
+          bate exatamente com "Envios" do extrato (pedido real
+          2000018537926936: list_cost=27.05, extrato mostrava -R$27,05). Se
+          o pedido nao tiver envio (retirada em loja, etc.) ou a chamada
+          falhar, cai pro calculo por diferenca
+          (valor_venda - comissao_real - receita_liquida) como aproximacao.
         """
         pedido_ml = self.obter_pedido(ml_order_id)
         itens = pedido_ml.get("order_items", [])
@@ -263,11 +281,27 @@ class MLClient:
             pagamento = self.obter_pagamento(str(pagamento_resumo["id"]))
             receita_liquida += pagamento["transaction_details"]["net_received_amount"]
 
+        frete_real = round(valor_venda - comissao_real - receita_liquida, 2)
+        shipping_id = (pedido_ml.get("shipping") or {}).get("id")
+        if shipping_id:
+            try:
+                envio = self.obter_envio(str(shipping_id))
+                list_cost = (envio.get("shipping_option") or {}).get("list_cost")
+                if list_cost is not None:
+                    frete_real = round(float(list_cost), 2)
+            except MLApiError:
+                logger.warning(
+                    "Falha ao buscar envio %s do pedido %s - usando frete por diferenca (%.2f)",
+                    shipping_id,
+                    ml_order_id,
+                    frete_real,
+                )
+
         return DetalheFinanceiroPedido(
             receita_liquida=round(receita_liquida, 2),
             valor_venda=round(valor_venda, 2),
             comissao_real=round(comissao_real, 2),
-            frete_real=round(valor_venda - comissao_real - receita_liquida, 2),
+            frete_real=frete_real,
         )
 
 
