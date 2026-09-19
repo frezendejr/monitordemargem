@@ -57,6 +57,45 @@ def carregar_tabela(nome: str) -> pd.DataFrame:
     return pd.DataFrame(resp.json())
 
 
+def _codigo_pai(sku: str) -> str:
+    """Convencao Amo Shoes: SKU = codigo_pai (N digitos) + tamanho (2
+    digitos) - confirmado contra dado real (SKU 916039 = "Tamanho: 39" no
+    proprio extrato do Mercado Livre, e o grupo 902834-902839 = pai 9028).
+    SKU sem esse padrao (curto demais ou nao-numerico) e seu proprio grupo."""
+    sku = str(sku).strip()
+    if len(sku) > 2 and sku[:-2].isdigit() and sku[-2:].isdigit():
+        return sku[:-2]
+    return sku
+
+
+def expandir_por_codigo_pai(registros: list[dict]) -> list[dict]:
+    """Custo nao muda entre tamanhos do mesmo produto - preencher o custo de
+    UM SKU aplica automaticamente o mesmo custo a todos os SKUs irmaos (mesmo
+    codigo_pai) que ja apareceram em alguma venda, mesmo que nao estejam na
+    lista de pendentes agora (podem ja ter outro custo, possivelmente errado,
+    ou nunca terem sido marcados como pendentes)."""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+
+    expandido = {str(r["sku"]): r["custo"] for r in registros}
+    for registro in registros:
+        pai = _codigo_pai(registro["sku"])
+        resp = requests.get(
+            f"{url}/rest/v1/margin_monitor_itens",
+            params={"select": "sku", "sku": f"like.{pai}*"},
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for linha in resp.json():
+            sku_irmao = linha["sku"]
+            if _codigo_pai(sku_irmao) == pai:
+                expandido.setdefault(sku_irmao, registro["custo"])
+
+    return [{"sku": sku, "custo": custo} for sku, custo in expandido.items()]
+
+
 def salvar_custos_no_supabase(registros: list[dict]) -> None:
     """Upsert em margin_monitor_custos - usa a mesma chave anon do
     dashboard (a tabela permite escrita por essa chave, ver
@@ -280,11 +319,13 @@ with aba_custos:
 
         st.caption(
             "Preenche a coluna 'custo' e importa de volta abaixo, ou edita direto na tabela mais "
-            "embaixo. Nos dois casos grava no Supabase na hora. Pedidos NOVOS já usam o custo "
-            "certo no ciclo seguinte; pedidos JÁ LANÇADOS com esse SKU (que aparecem como 'custo "
-            "ausente' hoje) são corrigidos automaticamente pelo monitor.py em até ~15 min "
-            "(ele não pode escrever aqui direto - só o dashboard - por segurança, já que esse "
-            "link é compartilhado com o time)."
+            "embaixo. Preencher o custo de UM tamanho aplica automaticamente o mesmo custo a "
+            "todos os tamanhos do mesmo código pai (custo não muda por tamanho). Nos dois casos "
+            "grava no Supabase na hora. Pedidos NOVOS já usam o custo certo no ciclo seguinte; "
+            "pedidos JÁ LANÇADOS com esse SKU (que aparecem como 'custo ausente' hoje) são "
+            "corrigidos automaticamente pelo monitor.py em até ~15 min (ele não pode escrever "
+            "aqui direto - só o dashboard - por segurança, já que esse link é compartilhado com "
+            "o time)."
         )
 
         arquivo = st.file_uploader("Importar planilha preenchida", type=["xlsx", "csv"], key="upload_custos")
@@ -304,18 +345,23 @@ with aba_custos:
                 elif st.button(f"💾 Importar {len(validos)} custo(s)"):
                     registros = validos[["sku", "custo"]].astype({"sku": str}).to_dict("records")
                     try:
+                        registros = expandir_por_codigo_pai(registros)
                         salvar_custos_no_supabase(registros)
-                        st.success(f"{len(registros)} custo(s) salvo(s) no Supabase.")
+                        st.success(f"{len(registros)} custo(s) salvo(s) no Supabase (incluindo tamanhos irmãos).")
                         carregar_tabela.clear()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Falha ao salvar: {e}")
 
+        resumo_sem_custo["codigo_pai"] = resumo_sem_custo["sku"].map(_codigo_pai)
         resumo_sem_custo["custo_novo"] = None
         editado = st.data_editor(
-            resumo_sem_custo[["sku", "quantidade", "receita_afetada", "pedidos", "custo_novo"]],
-            column_config={"custo_novo": st.column_config.NumberColumn("Custo (R$)", min_value=0.0, step=0.01)},
-            disabled=["sku", "quantidade", "receita_afetada", "pedidos"],
+            resumo_sem_custo[["sku", "codigo_pai", "quantidade", "receita_afetada", "pedidos", "custo_novo"]],
+            column_config={
+                "codigo_pai": st.column_config.TextColumn("Código pai"),
+                "custo_novo": st.column_config.NumberColumn("Custo (R$)", min_value=0.0, step=0.01),
+            },
+            disabled=["sku", "codigo_pai", "quantidade", "receita_afetada", "pedidos"],
             hide_index=True,
             use_container_width=True,
             key="editor_custos",
@@ -328,8 +374,9 @@ with aba_custos:
             else:
                 registros = preenchidos[["sku", "custo_novo"]].rename(columns={"custo_novo": "custo"}).to_dict("records")
                 try:
+                    registros = expandir_por_codigo_pai(registros)
                     salvar_custos_no_supabase(registros)
-                    st.success(f"{len(registros)} custo(s) salvo(s) no Supabase.")
+                    st.success(f"{len(registros)} custo(s) salvo(s) no Supabase (incluindo tamanhos irmãos).")
                     carregar_tabela.clear()
                     st.rerun()
                 except Exception as e:
