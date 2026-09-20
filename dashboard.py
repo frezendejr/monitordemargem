@@ -229,16 +229,45 @@ def _cores_para_categorias(categorias: list[str]) -> alt.Scale:
     return alt.Scale(domain=dominio, range=cores)
 
 
-def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, titulo: str, cores: alt.Scale | None = None):
+def _abreviar_numero(v: float) -> str:
+    """3521.8 -> "3,5k" - formato compacto pra caber maior na fatia da
+    pizza (o detalhe exato fica so no tooltip, ao passar o mouse)."""
+    sinal = "-" if v < 0 else ""
+    v = abs(v)
+    if v >= 1_000_000:
+        texto = f"{v / 1_000_000:.1f}mi"
+    elif v >= 1_000:
+        texto = f"{v / 1_000:.1f}k"
+    else:
+        texto = f"{v:.0f}"
+    return sinal + texto.replace(".", ",")
+
+
+def _grafico_pizza(
+    df: pd.DataFrame,
+    campo_categoria: str,
+    campo_valor: str,
+    titulo: str,
+    cores: alt.Scale | None = None,
+    eh_moeda: bool = True,
+):
     """Grafico de pizza via Altair (ja vem junto com o Streamlit, nao
     precisa de dependencia nova) - st.bar_chart/st.altair_chart nativos do
-    Streamlit nao tem tipo pizza. Sempre mostra valor + % do total escrito
-    na propria fatia (nao so no tooltip/legenda), a pedido do time."""
+    Streamlit nao tem tipo pizza. Fatia mostra so o essencial, resumido e
+    sem "R$" (formato "3,5k (44%)") pra caber maior e ler melhor de longe;
+    o valor exato (R$ ou nº de pedidos) fica no tooltip ao passar o mouse."""
     df = df.copy()
     total = df[campo_valor].sum()
-    df["_rotulo"] = df[campo_valor].apply(
-        lambda v: f"{_fmt_moeda(v)} ({v / total * 100:.0f}%)" if total else _fmt_moeda(v)
-    )
+
+    def _pct(v: float) -> float:
+        return (v / total * 100) if total else 0.0
+
+    if eh_moeda:
+        df["_rotulo_curto"] = df[campo_valor].apply(lambda v: f"{_abreviar_numero(v)} ({_pct(v):.0f}%)")
+        df["_rotulo_completo"] = df[campo_valor].apply(lambda v: f"{_fmt_moeda(v)} ({_pct(v):.0f}%)")
+    else:
+        df["_rotulo_curto"] = df[campo_valor].apply(lambda v: f"{v:.0f} ({_pct(v):.0f}%)")
+        df["_rotulo_completo"] = df[campo_valor].apply(lambda v: f"{v:.0f} pedido(s) ({_pct(v):.0f}%)")
 
     cor_encoding = (
         alt.Color(f"{campo_categoria}:N", legend=alt.Legend(title=titulo), scale=cores)
@@ -250,13 +279,13 @@ def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, tit
         color=cor_encoding,
         tooltip=[
             alt.Tooltip(f"{campo_categoria}:N", title=titulo),
-            alt.Tooltip("_rotulo:N", title="Valor"),
+            alt.Tooltip("_rotulo_completo:N", title="Valor"),
         ],
     )
     arco = base.mark_arc(outerRadius=160)
     texto = base.mark_text(
-        radius=112, size=13, fontWeight="bold", color="white", stroke="#111", strokeWidth=0.6
-    ).encode(text="_rotulo:N")
+        radius=112, size=16, font="Arial", fontWeight="bold", color="white", stroke="black", strokeWidth=1.1
+    ).encode(text="_rotulo_curto:N")
     return (arco + texto).properties(height=420)
 
 
@@ -1179,6 +1208,14 @@ with aba_visao:
         st.caption(
             "Tamanho da fatia = valor absoluto (margem negativa também vira fatia) - passe o mouse ou "
             "veja a tabela abaixo pro sinal real."
+        )
+
+    pc5, _pc6 = st.columns(2)
+    with pc5:
+        st.markdown("##### 🧾 Pedidos por Categoria")
+        st.altair_chart(
+            _grafico_pizza(por_categoria, "categoria", "pedidos", "Categoria", cores=escala_cat, eh_moeda=False),
+            use_container_width=True,
         )
     st.caption(
         f'"{SEM_CATEGORIA}" = produto que ainda não vendeu pelo Mercado Livre (única fonte da categoria, '
