@@ -123,7 +123,21 @@ class _TinyClientFake:
         ]
 
 
-def test_custo_vem_da_planilha_nao_do_tiny(tmp_path):
+def _sem_supabase(monkeypatch):
+    """processar_ciclo_conta chama supabase_writer.enviar_pedido/enviar_itens
+    DE VERDADE (so alimenta o dashboard, nunca falha o teste) - se por
+    acaso SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY reais estiverem no
+    ambiente (ex.: outro modulo chamou load_dotenv() antes, no mesmo
+    processo do pytest), esses testes gravavam pedido de teste de verdade
+    no Supabase de producao (bug real, achado em 2026-09-19: "conta_x",
+    pedido "1001"/"1002", sku "ABC" apareceram no dashboard como se fosse
+    venda real). Nunca deixa esse side-effect escapar do teste."""
+    monkeypatch.setattr(monitor.supabase_writer, "enviar_pedido", lambda *a, **k: None)
+    monkeypatch.setattr(monitor.supabase_writer, "enviar_itens", lambda *a, **k: None)
+
+
+def test_custo_vem_da_planilha_nao_do_tiny(tmp_path, monkeypatch):
+    _sem_supabase(monkeypatch)
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
         cliente = _TinyClientFake(falha_no_segundo=False)
         custos = {"ABC": 40.0}
@@ -137,7 +151,8 @@ def test_custo_vem_da_planilha_nao_do_tiny(tmp_path):
         assert resultado[0] == 0  # achou o custo na planilha
 
 
-def test_sku_fora_da_planilha_vira_custo_ausente(tmp_path):
+def test_sku_fora_da_planilha_vira_custo_ausente(tmp_path, monkeypatch):
+    _sem_supabase(monkeypatch)
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
         cliente = _TinyClientFake(falha_no_segundo=False)
         monitor.processar_ciclo_conta(
@@ -150,7 +165,8 @@ def test_sku_fora_da_planilha_vira_custo_ausente(tmp_path):
         assert resultado[0] == 1  # SKU "ABC" nao esta na planilha de custo
 
 
-def test_checkpoint_avanca_quando_ciclo_completa_sem_falha(tmp_path):
+def test_checkpoint_avanca_quando_ciclo_completa_sem_falha(tmp_path, monkeypatch):
+    _sem_supabase(monkeypatch)
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
         cliente = _TinyClientFake(falha_no_segundo=False)
         monitor.processar_ciclo_conta(
@@ -160,7 +176,8 @@ def test_checkpoint_avanca_quando_ciclo_completa_sem_falha(tmp_path):
         assert storage.obter_checkpoint(conn, "conta_x") is not None
 
 
-def test_checkpoint_nao_avanca_quando_algum_pedido_falha(tmp_path):
+def test_checkpoint_nao_avanca_quando_algum_pedido_falha(tmp_path, monkeypatch):
+    _sem_supabase(monkeypatch)
     with storage.sessao(str(tmp_path / "teste.db")) as conn:
         cliente = _TinyClientFake(falha_no_segundo=True)
         monitor.processar_ciclo_conta(
