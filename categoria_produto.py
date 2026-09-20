@@ -91,12 +91,15 @@ def resolver_categoria_via_ml(
             return None
         categoria_dados = ml_clientes[canal].obter_categoria(category_id)
         caminho = categoria_dados.get("path_from_root") or []
-        if len(caminho) > 1:
-            nome = caminho[1]["name"]
-        elif caminho:
-            nome = caminho[0]["name"]
-        else:
-            nome = categoria_dados.get("name")
+        # Usa o 1o nivel (topo da arvore do Meli, ex.: "Casa, Moveis e
+        # Decoracao", "Esportes e Fitness") - testado contra os 98 codigo_pai
+        # reais do catalogo em 2026-09-19: o 2o nivel espalhava produto de
+        # casa em 8 categorias diferentes (Cozinha, Iluminacao Residencial,
+        # Organizacao para Casa, Cuidado da Casa...), o que nao bate com o
+        # jeito que o time pensa em categoria (poucos grupos grandes:
+        # Calcados, Utensilios domesticos, Fitness) - o topo consolida tudo
+        # isso corretamente.
+        nome = caminho[0]["name"] if caminho else categoria_dados.get("name")
         return (nome, category_id) if nome else None
     except MLApiError:
         return None
