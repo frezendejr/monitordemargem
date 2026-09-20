@@ -232,7 +232,14 @@ def _cores_para_categorias(categorias: list[str]) -> alt.Scale:
 def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, titulo: str, cores: alt.Scale | None = None):
     """Grafico de pizza via Altair (ja vem junto com o Streamlit, nao
     precisa de dependencia nova) - st.bar_chart/st.altair_chart nativos do
-    Streamlit nao tem tipo pizza."""
+    Streamlit nao tem tipo pizza. Sempre mostra valor + % do total escrito
+    na propria fatia (nao so no tooltip/legenda), a pedido do time."""
+    df = df.copy()
+    total = df[campo_valor].sum()
+    df["_rotulo"] = df[campo_valor].apply(
+        lambda v: f"{_fmt_moeda(v)} ({v / total * 100:.0f}%)" if total else _fmt_moeda(v)
+    )
+
     cor_encoding = (
         alt.Color(f"{campo_categoria}:N", legend=alt.Legend(title=titulo), scale=cores)
         if cores is not None
@@ -246,7 +253,11 @@ def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, tit
             alt.Tooltip(f"{campo_valor}:Q", title="Valor", format=",.2f"),
         ],
     )
-    return base.mark_arc(outerRadius=160).properties(height=420)
+    arco = base.mark_arc(outerRadius=160)
+    texto = base.mark_text(
+        radius=110, size=12, fontWeight="bold", color="black", stroke="white", strokeWidth=2.5, opacity=1
+    ).encode(text="_rotulo:N")
+    return (arco + texto).properties(height=420)
 
 
 _GOLD = "#D9B559"
