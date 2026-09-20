@@ -295,6 +295,45 @@ _VERDE = "#3FBF6F"
 _VERMELHO = "#E5484D"
 
 
+def _grafico_barra_margem_pct(df: pd.DataFrame, campo_categoria: str, campo_pct: str, titulo: str):
+    """Margem % (margem ÷ receita) por grupo - de propósito NÃO é pizza:
+    cada marketplace/categoria tem a SUA PRÓPRIA margem %, uma taxa
+    independente, não uma fatia de um total que soma 100% (diferente do
+    "% do total" que as pizzas de cima mostram). Barra horizontal, verde
+    quando positiva e vermelha quando negativa, com o valor escrito na
+    ponta - o jeito mais direto de comparar taxas entre poucos grupos."""
+    df = df.copy()
+    df["_status"] = df[campo_pct].apply(lambda v: "Positiva" if v >= 0 else "Negativa")
+    df["_rotulo"] = df[campo_pct].apply(lambda v: f"{v:.1f}%")
+
+    base = alt.Chart(df).encode(
+        y=alt.Y(f"{campo_categoria}:N", sort="-x", title=None),
+        x=alt.X(f"{campo_pct}:Q", title="Margem % (margem ÷ receita)"),
+        color=alt.Color(
+            "_status:N",
+            scale=alt.Scale(domain=["Positiva", "Negativa"], range=[_VERDE, _VERMELHO]),
+            legend=None,
+        ),
+        tooltip=[
+            alt.Tooltip(f"{campo_categoria}:N", title=titulo),
+            alt.Tooltip(f"{campo_pct}:Q", title="Margem %", format=".1f"),
+        ],
+    )
+    barras = base.mark_bar(size=28)
+    texto_pos = (
+        base.transform_filter(alt.datum[campo_pct] >= 0)
+        .mark_text(align="left", dx=5, color="white", fontWeight="bold")
+        .encode(text="_rotulo:N")
+    )
+    texto_neg = (
+        base.transform_filter(alt.datum[campo_pct] < 0)
+        .mark_text(align="right", dx=-5, color="white", fontWeight="bold")
+        .encode(text="_rotulo:N")
+    )
+    altura = max(140, 55 * len(df))
+    return (barras + texto_pos + texto_neg).properties(height=altura)
+
+
 def _injetar_tema_amo():
     """Skin preto/dourado do Grupo Amo por cima do tema 'dark' base do
     Streamlit (.streamlit/config.toml) - fontes (Baloo 2 pros títulos/
@@ -1137,6 +1176,25 @@ with aba_visao:
             "veja a tabela abaixo pro sinal real."
         )
 
+    pc1b, pc2b = st.columns(2)
+    with pc1b:
+        st.markdown("##### 🧾 Pedidos por Marketplace")
+        st.altair_chart(
+            _grafico_pizza(por_mkt, "marketplace", "pedidos", "Marketplace", cores=escala_mkt, eh_moeda=False),
+            use_container_width=True,
+        )
+    with pc2b:
+        st.markdown("##### 📈 Margem % por Marketplace")
+        st.altair_chart(
+            _grafico_barra_margem_pct(por_mkt, "marketplace", "margem_pct", "Marketplace"),
+            use_container_width=True,
+        )
+        st.caption(
+            "Margem % = margem ÷ receita de CADA marketplace (não é fatia de pizza - é a taxa própria "
+            "dele, por isso barra em vez de pizza). Diferente do \"% do total\" na pizza de margem acima, "
+            "que é a participação daquele marketplace dentro da margem somada de todos."
+        )
+
     st.markdown("###### Detalhado por conta")
     pedidos_f_mkt["conta"] = pedidos_f_mkt["canal"].map(_nome_conta)
     por_conta = (
@@ -1210,12 +1268,23 @@ with aba_visao:
             "veja a tabela abaixo pro sinal real."
         )
 
-    pc5, _pc6 = st.columns(2)
+    pc5, pc6 = st.columns(2)
     with pc5:
         st.markdown("##### 🧾 Pedidos por Categoria")
         st.altair_chart(
             _grafico_pizza(por_categoria, "categoria", "pedidos", "Categoria", cores=escala_cat, eh_moeda=False),
             use_container_width=True,
+        )
+    with pc6:
+        st.markdown("##### 📈 Margem % por Categoria")
+        st.altair_chart(
+            _grafico_barra_margem_pct(por_categoria, "categoria", "margem_pct", "Categoria"),
+            use_container_width=True,
+        )
+        st.caption(
+            "Margem % = margem ÷ receita de CADA categoria (não é fatia de pizza - é a taxa própria "
+            "dela, por isso barra em vez de pizza). Diferente do \"% do total\" na pizza de margem acima, "
+            "que é a participação daquela categoria dentro da margem somada de todas."
         )
     st.caption(
         f'"{SEM_CATEGORIA}" = produto que ainda não vendeu pelo Mercado Livre (única fonte da categoria, '
