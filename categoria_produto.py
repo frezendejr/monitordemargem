@@ -23,6 +23,14 @@ from ml_client import MLApiError, MLClient
 
 SEM_CATEGORIA = "Sem categoria"
 
+# O time pensa em poucos grupos grandes (Calcados, Utilidade Domestica,
+# Fitness), nao na nomenclatura exata do Meli - essas 2 categorias de topo
+# do Meli viram uma so a pedido do time (2026-09-19).
+_RENOMEIA_CATEGORIA = {
+    "Casa, Móveis e Decoração": "Utilidade Doméstica",
+    "Construção": "Utilidade Doméstica",
+}
+
 
 def _codigo_pai(sku: str) -> str:
     """Mesma convencao usada no dashboard (Amo Shoes: SKU = codigo_pai +
@@ -100,7 +108,10 @@ def resolver_categoria_via_ml(
         # Calcados, Utensilios domesticos, Fitness) - o topo consolida tudo
         # isso corretamente.
         nome = caminho[0]["name"] if caminho else categoria_dados.get("name")
-        return (nome, category_id) if nome else None
+        if not nome:
+            return None
+        nome = _RENOMEIA_CATEGORIA.get(nome, nome)
+        return (nome, category_id)
     except MLApiError:
         return None
 
