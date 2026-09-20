@@ -972,6 +972,25 @@ with aba_visao:
         campo="margem_contribuicao", campo_meta="meta_margem_valor",
     )
 
+    # Meta do MES INTEIRO (nao a do periodo filtrado ao lado) - mesma base
+    # que calcular_projecao_mes usa por dentro pra tirar o % - reconstruida
+    # aqui so pra poder mostrar a diferenca em R$, nao so em %.
+    metas_mes_corrente = metas_por_mes.get(mes_corrente) or {}
+    meta_fat_mes_corrente = sum((m.get("meta_faturamento") or 0.0) for m in metas_mes_corrente.values())
+    meta_margem_mes_corrente = sum(
+        (m.get("meta_faturamento") or 0.0) * (m.get("meta_margem_pct") or 0.0) / 100
+        for m in metas_mes_corrente.values()
+    )
+
+    def _sub_diferenca_meta(valor: float | None, meta: float) -> str | None:
+        if valor is None or not meta:
+            return None
+        diferenca = valor - meta
+        return f"{_fmt_moeda(abs(diferenca))} {'acima' if diferenca >= 0 else 'abaixo'} da meta"
+
+    sub_projecao_fat = _sub_diferenca_meta(projecao_fat_mes, meta_fat_mes_corrente)
+    sub_projecao_margem = _sub_diferenca_meta(projecao_margem_mes, meta_margem_mes_corrente)
+
     with st.container(border=True):
         st.caption("Faturamento e margem (com meta e projeção) SEMPRE somam todas as contas/canais, independente do filtro ao lado.")
 
@@ -987,7 +1006,12 @@ with aba_visao:
                 sub=(f"{pct_fat - 100:+.1f}% da meta" if pct_fat is not None else None),
             )
         with cm3:
-            _kpi_card("📊 Margem", _fmt_moeda(margem_real), "green" if margem_real >= 0 else "red")
+            # Verde so quando bate a meta (nao so "e positivo") - uma margem
+            # positiva mas bem abaixo da meta nao e motivo pra comemorar.
+            # Sem meta cadastrada, cai pro sinal (positivo/negativo) como
+            # unico criterio disponivel.
+            status_margem_real = (margem_real >= meta_margem_periodo) if meta_margem_periodo else (margem_real >= 0)
+            _kpi_card("📊 Margem", _fmt_moeda(margem_real), "green" if status_margem_real else "red")
         with cm4:
             pct_margem = (margem_real / meta_margem_periodo * 100) if meta_margem_periodo else None
             _kpi_card(
@@ -1006,6 +1030,7 @@ with aba_visao:
                 f"📈 Projeção Faturamento ({mes_corrente.strftime('%m/%Y')})",
                 _fmt_moeda(projecao_fat_mes) if projecao_fat_mes is not None else "sem dado suficiente",
                 status_fat_proj if projecao_fat_mes is not None else "neutral",
+                sub=sub_projecao_fat,
             )
         with cp2:
             _kpi_card(
@@ -1020,6 +1045,7 @@ with aba_visao:
                 f"📈 Projeção Margem ({mes_corrente.strftime('%m/%Y')})",
                 _fmt_moeda(projecao_margem_mes) if projecao_margem_mes is not None else "sem dado suficiente",
                 status_margem_proj if projecao_margem_mes is not None else "neutral",
+                sub=sub_projecao_margem,
             )
         with cp4:
             _kpi_card(
