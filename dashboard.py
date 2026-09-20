@@ -250,7 +250,7 @@ def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, tit
         color=cor_encoding,
         tooltip=[
             alt.Tooltip(f"{campo_categoria}:N", title=titulo),
-            alt.Tooltip(f"{campo_valor}:Q", title="Valor", format=",.2f"),
+            alt.Tooltip("_rotulo:N", title="Valor"),
         ],
     )
     arco = base.mark_arc(outerRadius=160)
@@ -1116,16 +1116,22 @@ with aba_visao:
         .reset_index()
     )
     por_conta["margem_pct"] = (por_conta["margem"] / por_conta["receita"] * 100).round(1)
+    total_receita_conta = por_conta["receita"].sum()
+    total_margem_conta = por_conta["margem"].abs().sum()
+    por_conta["pct_receita"] = (por_conta["receita"] / total_receita_conta * 100).round(1) if total_receita_conta else 0.0
+    por_conta["pct_margem"] = (por_conta["margem"].abs() / total_margem_conta * 100).round(1) if total_margem_conta else 0.0
     por_conta = por_conta.sort_values(["marketplace", "margem"], ascending=[True, False])
     st.dataframe(
-        por_conta[["marketplace", "conta", "receita", "margem", "margem_pct", "pedidos"]],
+        por_conta[["marketplace", "conta", "receita", "pct_receita", "margem", "pct_margem", "margem_pct", "pedidos"]],
         hide_index=True,
         use_container_width=True,
         column_config={
             "marketplace": "Marketplace",
             "conta": "Conta",
             "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+            "pct_receita": st.column_config.NumberColumn("% do Faturamento", format="%.1f%%"),
             "margem": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
+            "pct_margem": st.column_config.NumberColumn("% da Margem", format="%.1f%%"),
             "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
             "pedidos": "Pedidos",
         },
@@ -1151,6 +1157,10 @@ with aba_visao:
     por_categoria["margem_pct"] = (por_categoria["margem"] / por_categoria["receita"] * 100).round(1)
     por_categoria = por_categoria.sort_values("margem", ascending=False)
     por_categoria["margem_abs"] = por_categoria["margem"].abs()
+    total_receita_cat = por_categoria["receita"].sum()
+    total_margem_cat = por_categoria["margem_abs"].sum()
+    por_categoria["pct_receita"] = (por_categoria["receita"] / total_receita_cat * 100).round(1) if total_receita_cat else 0.0
+    por_categoria["pct_margem"] = (por_categoria["margem_abs"] / total_margem_cat * 100).round(1) if total_margem_cat else 0.0
     escala_cat = _cores_para_categorias(por_categoria["categoria"].tolist())
 
     pc3, pc4 = st.columns(2)
@@ -1175,13 +1185,15 @@ with aba_visao:
         "via API) ou que ainda não foi classificado nesse ciclo."
     )
     st.dataframe(
-        por_categoria[["categoria", "receita", "margem", "margem_pct", "pedidos"]],
+        por_categoria[["categoria", "receita", "pct_receita", "margem", "pct_margem", "margem_pct", "pedidos"]],
         hide_index=True,
         use_container_width=True,
         column_config={
             "categoria": "Categoria",
             "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+            "pct_receita": st.column_config.NumberColumn("% do Faturamento", format="%.1f%%"),
             "margem": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
+            "pct_margem": st.column_config.NumberColumn("% da Margem", format="%.1f%%"),
             "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
             "pedidos": "Pedidos",
         },
