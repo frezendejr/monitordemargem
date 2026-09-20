@@ -29,6 +29,7 @@ SEM_CATEGORIA = "Sem categoria"
 _RENOMEIA_CATEGORIA = {
     "Casa, Móveis e Decoração": "Utilidade Doméstica",
     "Construção": "Utilidade Doméstica",
+    "Calçados, Roupas e Bolsas": "Calçados",
 }
 
 
