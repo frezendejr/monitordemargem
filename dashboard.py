@@ -255,7 +255,7 @@ def _grafico_pizza(df: pd.DataFrame, campo_categoria: str, campo_valor: str, tit
     )
     arco = base.mark_arc(outerRadius=160)
     texto = base.mark_text(
-        radius=110, size=12, fontWeight="bold", color="black", stroke="white", strokeWidth=2.5, opacity=1
+        radius=112, size=13, fontWeight="bold", color="white", stroke="#111", strokeWidth=0.6
     ).encode(text="_rotulo:N")
     return (arco + texto).properties(height=420)
 
