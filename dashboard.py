@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
 import pandas as pd
@@ -42,6 +42,17 @@ def _config(chave: str) -> str:
     except Exception:
         pass
     return os.environ[chave]
+
+
+def _hoje_brasilia() -> date:
+    """date.today() usa o fuso do SERVIDOR - o dashboard roda no Streamlit
+    Community Cloud, cujo relogio e UTC. Como Brasilia esta 3h atras, isso
+    fazia "hoje" virar o dia seguinte 3h ANTES da meia-noite real em
+    Brasilia (bug real, 2026-09-19: usuario viu o filtro "Hoje" mostrando
+    20/09 as 21:33 de 19/09 no horario dele - que e so 00:33 UTC do dia
+    20, o servidor ja tinha virado o dia). Usar isso em vez de
+    date.today() em TUDO que precisa saber "que dia e hoje" pro time."""
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).date()
 
 
 _PAGINA_SUPABASE = 1000
@@ -365,7 +376,7 @@ def calcular_indices_dia_semana(pedidos_hist: pd.DataFrame, janela_dias: int = 9
     pela media geral. Indice 1.0 = dia tipico; 1.3 = 30% acima da media.
     Mesmo metodo da planilha de metas de referencia do time ("Índices por
     dia da semana calculados sobre os dias com dado verificado")."""
-    limite = pd.Timestamp(date.today() - timedelta(days=janela_dias))
+    limite = pd.Timestamp(_hoje_brasilia() - timedelta(days=janela_dias))
     hist = pedidos_hist[pedidos_hist["data_pedido_dt"] >= limite]
     if hist.empty:
         return {i: 1.0 for i in range(7)}
@@ -397,7 +408,7 @@ def calcular_mix_canal(pedidos_hist: pd.DataFrame, canais: list[str], janela_dia
     1 meta total (ponto de partida a partir do histórico real de vendas);
     o time ainda pode ajustar linha a linha depois pra refletir decisão
     estratégica (ex.: crescer um canal de propósito)."""
-    limite = pd.Timestamp(date.today() - timedelta(days=janela_dias))
+    limite = pd.Timestamp(_hoje_brasilia() - timedelta(days=janela_dias))
     hist = pedidos_hist[(pedidos_hist["data_pedido_dt"] >= limite) & (pedidos_hist["canal"].isin(canais))]
     if hist.empty:
         return {canal: 1 / len(canais) for canal in canais} if canais else {}
@@ -473,7 +484,7 @@ def calcular_projecao_mes(
     meta_faturamento * meta_margem_pct / 100, ja que o cadastro so guarda a
     margem em %, nao em R$). Retorna (projecao_r$, pct_da_meta) - qualquer
     um pode vir None se nao houver dado/meta suficiente."""
-    hoje = date.today()
+    hoje = _hoje_brasilia()
     dias_mes = _dias_do_mes(mes)
     dias_passados = [d for d in dias_mes if d <= hoje]
     dias_futuros = [d for d in dias_mes if d > hoje]
@@ -526,7 +537,7 @@ def montar_relatorio_diario(
     uma linha de total do dia) 100% a partir do Supabase - substitui o
     preenchimento manual de Realizado/Pedidos/Tkmedio/Gap/Acumulados."""
     dias_mes = _dias_do_mes(mes)
-    hoje = date.today()
+    hoje = _hoje_brasilia()
     pedidos_mes = pedidos_hist[
         (pedidos_hist["data_pedido_dt"].dt.date >= dias_mes[0]) & (pedidos_hist["data_pedido_dt"].dt.date <= dias_mes[-1])
     ]
@@ -700,10 +711,10 @@ pedidos["valor_venda_efetivo"] = pedidos["valor_venda"].fillna(pedidos["receita"
 st.sidebar.header("Filtros")
 
 datas_validas = pedidos["data_pedido_dt"].dropna()
-data_min_dados = datas_validas.min().date() if not datas_validas.empty else date.today()
-data_max_dados = datas_validas.max().date() if not datas_validas.empty else date.today()
+data_min_dados = datas_validas.min().date() if not datas_validas.empty else _hoje_brasilia()
+data_max_dados = datas_validas.max().date() if not datas_validas.empty else _hoje_brasilia()
 
-hoje = date.today()
+hoje = _hoje_brasilia()
 hoje_no_intervalo = min(max(hoje, data_min_dados), data_max_dados)
 opcoes_periodo = {
     "Hoje": (hoje, hoje),
@@ -788,7 +799,7 @@ with aba_visao:
 
     with st.expander("🎯 Meta do mês (por canal, faturamento + margem)"):
         mes_config = st.date_input(
-            "Configurar meta de qual mês?", value=date.today().replace(day=1), format="DD/MM/YYYY", key="mes_config_visao"
+            "Configurar meta de qual mês?", value=_hoje_brasilia().replace(day=1), format="DD/MM/YYYY", key="mes_config_visao"
         ).replace(day=1)
         metas_existentes = metas_por_mes.get(mes_config, {})
         chave_autofill = f"metas_autofill_{mes_config.isoformat()}"
@@ -872,7 +883,7 @@ with aba_visao:
     margem_com_custo = itens_com_custo["margem_contribuicao"].sum()
     margem_pct_media = (margem_com_custo / receita_com_custo * 100) if receita_com_custo else 0
 
-    mes_corrente = date.today().replace(day=1)
+    mes_corrente = _hoje_brasilia().replace(day=1)
     projecao_fat_mes, pct_projecao_fat_meta = calcular_projecao_mes(
         pedidos, mes_corrente, metas_por_mes.get(mes_corrente), indices_por_canal,
         campo="valor_venda_efetivo", campo_meta="meta_faturamento",
@@ -1173,7 +1184,7 @@ with aba_metas:
         "Só a Meta e a Hiper Meta de cada canal são cadastradas (aba Visão geral), 1 vez por mês."
     )
     mes_relatorio = st.date_input(
-        "Mês do relatório", value=date.today().replace(day=1), format="DD/MM/YYYY", key="mes_relatorio_diario"
+        "Mês do relatório", value=_hoje_brasilia().replace(day=1), format="DD/MM/YYYY", key="mes_relatorio_diario"
     ).replace(day=1)
 
     metas_mes_relatorio = metas_por_mes.get(mes_relatorio, {})
