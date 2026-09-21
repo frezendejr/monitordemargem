@@ -60,7 +60,11 @@ class DetalheFinanceiroPedidoShopee:
 
 
 BASE_URL_PROD = "https://partner.shopeemobile.com"
-BASE_URL_TEST = "https://partner.test-stable.shopeemobile.com"
+BASE_URL_TEST = "https://openplatform.sandbox.test-stable.shopee.sg"
+# Confirmado direto no "API Test Tool" do Shopee Open Platform Console
+# (2026-09-21) - documentacao publica de terceiros indicava
+# "partner.test-stable.shopeemobile.com", que dava "Wrong sign" (era o
+# dominio errado, nao um bug de assinatura).
 
 
 class ShopeeApiError(RuntimeError):
