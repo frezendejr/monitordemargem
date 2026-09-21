@@ -270,6 +270,36 @@ class ShopeeClient:
             raise ShopeeApiError(f"Erro da API Shopee em {path}: {dados}")
         return dados
 
+    def obter_lista_pedidos(
+        self,
+        time_from: int,
+        time_to: int,
+        cursor: str = "",
+        time_range_field: str = "update_time",
+        page_size: int = 100,
+    ) -> dict:
+        """/api/v2/order/get_order_list - lista resumida de pedidos (so
+        order_sn + status) numa janela de tempo. Shopee limita a janela a
+        no maximo 15 dias por chamada (documentado) - pra janelas maiores,
+        chamar varias vezes deslizando time_from/time_to. Pagina via
+        `cursor` (resposta traz mais_pagina/next_cursor - nome de campo
+        exato AINDA NAO confirmado, ver --debug-lista).
+
+        `time_range_field`: "create_time" (pra backfill/historico) ou
+        "update_time" (pra sync incremental - equivalente ao
+        buscar_pedidos_atualizados_desde do tiny_client.py)."""
+        return self._get(
+            "/api/v2/order/get_order_list",
+            {
+                "time_range_field": time_range_field,
+                "time_from": time_from,
+                "time_to": time_to,
+                "page_size": page_size,
+                "cursor": cursor,
+                "response_optional_fields": "order_status",
+            },
+        )
+
     def obter_detalhe_pedido(self, order_sn: str) -> dict:
         """/api/v2/order/get_order_detail - dados gerais do pedido (itens,
         valores, status). NAO tem o detalhamento de taxas/comissao - isso
@@ -315,6 +345,9 @@ def _main():
     parser.add_argument("--shop-id", metavar="SHOP_ID", help="shop_id que veio junto com o code na redirect_uri")
     parser.add_argument("--debug-pedido", metavar="ORDER_SN", help="Imprime o JSON completo de um pedido")
     parser.add_argument("--debug-escrow", metavar="ORDER_SN", help="Imprime o detalhe financeiro (escrow) de um pedido")
+    parser.add_argument(
+        "--debug-lista", metavar="DIAS", type=int, help="Imprime pedidos atualizados nos ultimos N dias (max 15)"
+    )
     args = parser.parse_args()
 
     redirect_uri = os.environ["SHOPEE_REDIRECT_URI"]
@@ -337,6 +370,11 @@ def _main():
         cliente = ShopeeClient(args.loja, args.ambiente)
         escrow = cliente.obter_escrow_detalhe(args.debug_escrow)
         print(json.dumps(escrow, indent=2, ensure_ascii=False))
+    elif args.debug_lista:
+        cliente = ShopeeClient(args.loja, args.ambiente)
+        agora = int(time.time())
+        lista = cliente.obter_lista_pedidos(agora - args.debug_lista * 86400, agora)
+        print(json.dumps(lista, indent=2, ensure_ascii=False))
     else:
         parser.print_help()
 
