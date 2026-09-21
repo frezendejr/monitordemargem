@@ -201,6 +201,29 @@ def salvar_custos_no_supabase(registros: list[dict]) -> None:
     resp.raise_for_status()
 
 
+def salvar_categorias_no_supabase(registros: list[dict]) -> None:
+    """Upsert em margin_monitor_categorias pela chave anon - so pra
+    classificacao MANUAL feita no dashboard (a API do Meli continua
+    classificando automaticamente via categoria_produto.py, com a service
+    role - ver supabase_schema_categorias_escrita.sql pra liberar essa
+    escrita adicional pra chave anon). Cada registro: {"codigo_pai": ...,
+    "categoria": ...}."""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    resp = requests.post(
+        f"{url}/rest/v1/margin_monitor_categorias?on_conflict=codigo_pai",
+        json=registros,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def _fmt_moeda(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
@@ -1401,16 +1424,79 @@ with aba_produtos:
             .reset_index()
         )
         por_sku["margem_pct"] = (por_sku["margem"] / por_sku["receita"] * 100).round(1)
+        por_sku["codigo_pai"] = por_sku["sku"].map(_codigo_pai)
+        por_sku["categoria"] = por_sku["codigo_pai"].map(categorias_produto).fillna(SEM_CATEGORIA)
 
+        categorias_existentes = sorted(set(c for c in categorias_produto.values() if c))
+        categorias_filtro = st.multiselect(
+            "Filtrar por categoria", options=sorted(set(por_sku["categoria"])), key="filtro_categoria_produtos"
+        )
+        if categorias_filtro:
+            por_sku = por_sku[por_sku["categoria"].isin(categorias_filtro)]
+
+        colunas_exibir_sku = ["sku", "codigo_pai", "categoria", "receita", "margem", "margem_pct", "quantidade", "pedidos"]
         tab_piores, tab_melhores, tab_todos = st.tabs(["Piores margens", "Melhores margens", "Todos os SKUs"])
         with tab_piores:
-            st.dataframe(por_sku.sort_values("margem").head(30), hide_index=True, use_container_width=True)
+            st.dataframe(
+                por_sku.sort_values("margem").head(30)[colunas_exibir_sku], hide_index=True, use_container_width=True
+            )
         with tab_melhores:
             st.dataframe(
-                por_sku.sort_values("margem", ascending=False).head(30), hide_index=True, use_container_width=True
+                por_sku.sort_values("margem", ascending=False).head(30)[colunas_exibir_sku],
+                hide_index=True,
+                use_container_width=True,
             )
         with tab_todos:
-            st.dataframe(por_sku.sort_values("margem"), hide_index=True, use_container_width=True)
+            st.dataframe(por_sku.sort_values("margem")[colunas_exibir_sku], hide_index=True, use_container_width=True)
+
+        with st.expander("🏷️ Classificar categoria manualmente"):
+            st.caption(
+                "Escolha uma categoria já existente no catálogo pra cada código pai. Vale pra produto "
+                "que ainda não vendeu pelo Mercado Livre (única fonte automática de categoria) - grava "
+                "na hora, sem esperar o próximo ciclo."
+            )
+            por_codigo_pai = (
+                por_sku.groupby(["codigo_pai", "categoria"])
+                .agg(receita=("receita", "sum"), pedidos=("pedidos", "sum"))
+                .reset_index()
+                .sort_values("receita", ascending=False)
+            )
+            por_codigo_pai["categoria_nova"] = por_codigo_pai["categoria"]
+            editado_categoria = st.data_editor(
+                por_codigo_pai[["codigo_pai", "categoria", "receita", "pedidos", "categoria_nova"]],
+                column_config={
+                    "codigo_pai": st.column_config.TextColumn("Código pai"),
+                    "categoria": st.column_config.TextColumn("Categoria atual"),
+                    "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+                    "categoria_nova": st.column_config.SelectboxColumn(
+                        "Nova categoria", options=categorias_existentes
+                    ),
+                },
+                disabled=["codigo_pai", "categoria", "receita", "pedidos"],
+                hide_index=True,
+                use_container_width=True,
+                key="editor_categorias",
+            )
+            if st.button("💾 Salvar categorias escolhidas"):
+                alterados = editado_categoria[
+                    editado_categoria["categoria_nova"].notna()
+                    & (editado_categoria["categoria_nova"] != editado_categoria["categoria"])
+                ]
+                if alterados.empty:
+                    st.warning("Nenhuma categoria nova escolhida pra salvar.")
+                else:
+                    registros = (
+                        alterados[["codigo_pai", "categoria_nova"]]
+                        .rename(columns={"categoria_nova": "categoria"})
+                        .to_dict("records")
+                    )
+                    try:
+                        salvar_categorias_no_supabase(registros)
+                        st.success(f"{len(registros)} categoria(s) salva(s).")
+                        carregar_categorias_produto.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Falha ao salvar: {e}")
 
 # ---- Custos pendentes ----------------------------------------------------
 with aba_custos:
