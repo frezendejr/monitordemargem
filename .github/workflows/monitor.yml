@@ -1,11 +1,11 @@
 name: Monitor de margem (ciclo agendado)
 
 on:
-  schedule:
-    # A cada 15 min. GitHub nao garante pontualidade exata (pode atrasar
-    # alguns minutos em horario de pico) - normal pra Actions agendado.
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {} # permite disparar manual pela aba Actions do GitHub
+  # Agendamento automatico desativado em 22/09/2026: o ciclo passou a rodar
+  # direto numa VM (Oracle Cloud, systemd timer a cada 20 min) - ver
+  # margin-monitor.timer/.service na VM e a secao "Hospedagem" do README.
+  # Mantido so pra disparo manual (debug) pela aba Actions do GitHub.
+  workflow_dispatch: {}
 
 jobs:
   monitor:
