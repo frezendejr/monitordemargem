@@ -1206,6 +1206,11 @@ with aba_visao:
         )
         resp_alertas.raise_for_status()
         alertas_estoque = pd.DataFrame(resp_alertas.json())
+        if not alertas_estoque.empty:
+            alertas_estoque = alertas_estoque[
+                alertas_estoque["conta_tiny"].isin(contas_selecionadas)
+                & alertas_estoque["canal"].isin(canais_selecionados)
+            ]
     except Exception:
         alertas_estoque = pd.DataFrame()
 
