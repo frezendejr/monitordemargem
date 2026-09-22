@@ -1194,6 +1194,64 @@ with aba_visao:
     else:
         st.success("✅ Nenhuma venda abaixo do custo da mercadoria no período.")
 
+    # -- Alertas de estoque/Ads (grade furada, estoque zerado) -------------
+    try:
+        url_alertas = _config("SUPABASE_URL").rstrip("/")
+        key_alertas = _config("SUPABASE_ANON_KEY")
+        resp_alertas = requests.get(
+            f"{url_alertas}/rest/v1/margin_monitor_alertas_estoque",
+            headers={"apikey": key_alertas, "Authorization": f"Bearer {key_alertas}"},
+            params={"select": "*", "ativo": "eq.true", "order": "criado_em.desc"},
+            timeout=15,
+        )
+        resp_alertas.raise_for_status()
+        alertas_estoque = pd.DataFrame(resp_alertas.json())
+    except Exception:
+        alertas_estoque = pd.DataFrame()
+
+    if not alertas_estoque.empty:
+        st.markdown(
+            """
+            <style>
+            @keyframes piscar_alerta_estoque { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+            .alerta-estoque {
+                animation: piscar_alerta_estoque 1.1s infinite;
+                background-color: #b8860b; color: white; padding: 14px;
+                border-radius: 8px; font-weight: bold; text-align: center;
+                margin-bottom: 8px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        n_grade = int((alertas_estoque["tipo"] == "grade_furada").sum())
+        n_zerado = int((alertas_estoque["tipo"] == "estoque_zerado").sum())
+        st.markdown(
+            f'<div class="alerta-estoque">📦 {n_grade} grade(s) furada(s) com ADS ativo · '
+            f"{n_zerado} produto(s) com estoque zerado - clique abaixo pra ver quais</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button(f"🔎 Ver os {len(alertas_estoque)} alerta(s) de estoque/Ads"):
+            st.session_state["mostrar_alertas_estoque"] = not st.session_state.get("mostrar_alertas_estoque", False)
+        if st.session_state.get("mostrar_alertas_estoque"):
+            st.dataframe(
+                alertas_estoque[["canal", "anuncio_id", "tipo", "detalhe", "criado_em"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "canal": "Canal",
+                    "anuncio_id": "Anúncio (ML)",
+                    "tipo": "Tipo",
+                    "detalhe": "Detalhe",
+                    "criado_em": "Detectado em",
+                },
+            )
+            st.caption(
+                "Grade furada = menos da metade dos tamanhos daquela cor sem estoque, com ADS (Product Ads) "
+                "ativo no anúncio. Estoque zerado = produto sem variação com estoque em 0 - recomendado "
+                "pausar o anúncio. Por enquanto só alerta, não pausa nada sozinho."
+            )
+
     st.subheader("Faturamento e margem por marketplace")
     pedidos_f_mkt = pedidos_f.copy()
     pedidos_f_mkt["marketplace"] = pedidos_f_mkt["canal"].map(_marketplace_generico)

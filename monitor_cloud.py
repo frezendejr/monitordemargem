@@ -30,6 +30,7 @@ import supabase_writer
 from alerts import enviar_email, enviar_whatsapp, montar_mensagem_alerta
 from categoria_produto import recalcular_categoria_pendente
 from custo_planilha import recalcular_custo_pendente, sobrepor_custos_do_dashboard
+from estoque_ads import verificar_alertas_estoque
 from margin_engine import calcular_margem
 from ml_client import MLApiError, MLClient
 from tiny_client import TinyApiError, TinyClient
@@ -210,6 +211,19 @@ def main():
     n_categorias = recalcular_categoria_pendente()
     if n_categorias:
         logger.info("Categoria de produto classificada via API do Meli: %d codigo(s) pai", n_categorias)
+
+    try:
+        novos_alertas_estoque = verificar_alertas_estoque(config)
+        for alerta in novos_alertas_estoque:
+            mensagem = (
+                f"⚠️ {alerta['tipo'].replace('_', ' ').upper()} - {alerta['canal']}\n"
+                f"Anúncio: {alerta['anuncio_id']}\n{alerta['detalhe']}"
+            )
+            enviar_whatsapp(mensagem, config)
+            enviar_email(f"Alerta de estoque/Ads - {alerta['anuncio_id']}", mensagem, config)
+            logger.warning("Novo alerta de estoque: %s", mensagem)
+    except Exception:
+        logger.exception("Falha checando alertas de estoque/ads - seguindo o ciclo normal")
 
     total = 0
     for conta_tiny, conta_cfg in config["tiny_contas"].items():

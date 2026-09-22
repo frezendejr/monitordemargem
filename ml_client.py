@@ -263,8 +263,10 @@ class MLClient:
         return resp.json()
 
     def obter_item(self, item_id: str) -> dict:
-        """Detalhe do anuncio (MLB...) - usado so pra pegar category_id.
-        Precisa de token (o endpoint bloqueia acesso anonimo com 403
+        """Detalhe COMPLETO do anuncio (MLB...) - category_id, status,
+        available_quantity (estoque total) e variations[] (estoque por
+        variacao/tamanho/cor, campo attribute_combinations). Precisa de
+        token (o endpoint bloqueia acesso anonimo com 403
         "PA_UNAUTHORIZED_RESULT_FROM_POLICIES", confirmado real em
         2026-09-19), e precisa ser o token da MESMA subconta dona do
         anuncio - usar token de outra subconta Meli tambem da 403."""
@@ -272,12 +274,56 @@ class MLClient:
         resp = requests.get(
             f"{BASE_URL}/items/{item_id}",
             headers={"Authorization": f"Bearer {access_token}"},
-            params={"attributes": "id,category_id"},
             timeout=15,
         )
         if not resp.ok:
             raise MLApiError(f"Falha ao obter item {item_id}: {resp.status_code} {resp.text}")
         return resp.json()
+
+    def obter_advertiser_id(self) -> int | None:
+        """/advertising/advertisers?product_id=PADS - o advertiser_id do
+        Mercado Ads (Product Ads) dessa subconta, necessario pras chamadas
+        de obter_itens_com_ads. Retorna None se a conta nao tiver Mercado
+        Ads habilitado (lista vazia)."""
+        access_token = self._access_token_valido()
+        resp = requests.get(
+            f"{BASE_URL}/advertising/advertisers",
+            headers={"Authorization": f"Bearer {access_token}", "Api-Version": "1"},
+            params={"product_id": "PADS"},
+            timeout=15,
+        )
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter advertiser_id: {resp.status_code} {resp.text}")
+        advertisers = resp.json().get("advertisers") or []
+        return advertisers[0]["advertiser_id"] if advertisers else None
+
+    def obter_itens_com_ads(self, item_ids: list[str], advertiser_id: int) -> set[str]:
+        """/advertising/MLB/advertisers/{id}/product_ads/items?item_ids=...
+        (confirmado real em 2026-09-21, nao documentado publicamente do
+        jeito certo - parametro e "item_ids" no plural, aceita lote
+        separado por virgula, MAXIMO 50 POR CHAMADA - "Maximum of 50
+        item_ids allowed", confirmado real - pagina em lotes de 50) -
+        devolve so os item_id que TEM anuncio de Product Ads ativo (item
+        sem Ads simplesmente nao aparece no resultado, sem erro). Usado
+        pro alerta de "grade furada com ADS ativo" - so dispara pra quem
+        esta gastando com anuncio pago."""
+        if not item_ids:
+            return set()
+        access_token = self._access_token_valido()
+        encontrados: set[str] = set()
+        for i in range(0, len(item_ids), 50):
+            lote = item_ids[i : i + 50]
+            resp = requests.get(
+                f"{BASE_URL}/advertising/MLB/advertisers/{advertiser_id}/product_ads/items",
+                headers={"Authorization": f"Bearer {access_token}", "Api-Version": "1"},
+                params={"item_ids": ",".join(lote)},
+                timeout=15,
+            )
+            if not resp.ok:
+                raise MLApiError(f"Falha ao checar Ads dos itens: {resp.status_code} {resp.text}")
+            resultados = resp.json().get("results") or []
+            encontrados.update(r["item_id"] for r in resultados)
+        return encontrados
 
     def obter_categoria(self, category_id: str) -> dict:
         """Detalhe da categoria (nome + path_from_root, a hierarquia
