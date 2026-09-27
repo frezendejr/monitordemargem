@@ -317,33 +317,6 @@ class ShopeeClient:
         de campo confirmados em 27/09/2026 - ver obter_detalhe_financeiro_pedido."""
         return self._get("/api/v2/payment/get_escrow_detail", {"order_sn": order_sn})
 
-    def obter_tacos_periodo(self, dias: int = 29) -> tuple[float, float]:
-        """/api/v2/ads/get_all_cpc_ads_daily_performance - desempenho diario
-        de Ads da loja inteira (todas as campanhas). Confirmado ao vivo em
-        27/09/2026: `expense` = gasto de Ads no dia, `broad_gmv` = faturamento
-        da loja inteira no dia (nao so o atribuido ao clique do anuncio -
-        broad_gmv e o numero certo pro TACOS = gasto Ads / faturamento total,
-        diferente de direct_gmv que so conta venda originada do clique).
-
-        Retorna (gasto_total, faturamento_total) somados no periodo - quem
-        chama calcula o % (round(gasto/faturamento*100, 2)).
-
-        A Shopee rejeita janela > 1 mes exato - por isso o padrao e 29 dias,
-        nao 30 (30 as vezes da "Date range can't be longer than 1 month").
-        Esse endpoint tem rate limit mais apertado que os outros da API -
-        chamar no maximo 1-2x ao dia (ver shopee_ads_pct_job.py), nunca a
-        cada ciclo do monitor."""
-        fim = datetime.now(timezone.utc).date()
-        inicio = fim - timedelta(days=dias)
-        resp = self._get(
-            "/api/v2/ads/get_all_cpc_ads_daily_performance",
-            {"start_date": inicio.strftime("%d-%m-%Y"), "end_date": fim.strftime("%d-%m-%Y")},
-        )
-        dias_resp = resp.get("response") or []
-        gasto_total = sum(float(d.get("expense") or 0) for d in dias_resp)
-        gmv_total = sum(float(d.get("broad_gmv") or 0) for d in dias_resp)
-        return gasto_total, gmv_total
-
     def obter_campanhas_com_metricas(self, dias: int = 7) -> list[dict]:
         """Combina get_product_level_campaign_id_list (lista de campanhas)
         + get_product_campaign_daily_performance (metricas diarias, somadas
