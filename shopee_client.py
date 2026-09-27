@@ -6,13 +6,9 @@ a API da Shopee pra pegar comissao/frete/Ads REAIS do pedido, em vez de
 estimar por % fixo (mesmo padrao ja usado pro Mercado Livre - ver
 ml_client.py, DetalheFinanceiroPedido/obter_detalhe_financeiro_pedido).
 
-IMPORTANTE - NAO CALIBRADO AINDA: os nomes exatos dos campos financeiros
-(comissao, frete, Ads) dentro do retorno de get_escrow_detail ainda NAO
-foram confirmados contra um pedido real (so contra documentacao publica de
-terceiros, que diverge em detalhe). obter_detalhe_financeiro_pedido()
-propositalmente levanta NotImplementedError ate isso ser calibrado - mesma
-disciplina usada em todo o projeto (nunca confiar em nome de campo sem
-confirmar contra resposta real da API, ver README/ml_client.py).
+Calibrado em 27/09/2026 contra pedido real (Shopee 1, COMPLETED) - ver
+docstring de obter_detalhe_financeiro_pedido() pros nomes de campo
+confirmados e a conta que bate exata com escrow_amount.
 
 Fluxo de autorizacao (manual, uma vez por loja Shopee):
     python shopee_client.py --loja shopee_1 --auth-url
@@ -42,6 +38,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -209,12 +206,12 @@ def _renovar_com_refresh_token(
     return dados
 
 
-def _env_partner_id() -> str:
-    return os.environ["SHOPEE_PARTNER_ID"]
+def _env_partner_id(loja: str) -> str:
+    return os.environ[f"SHOPEE_PARTNER_ID_{loja.upper()}"]
 
 
-def _env_partner_key() -> str:
-    return os.environ["SHOPEE_PARTNER_KEY"]
+def _env_partner_key(loja: str) -> str:
+    return os.environ[f"SHOPEE_PARTNER_KEY_{loja.upper()}"]
 
 
 class ShopeeClient:
@@ -226,13 +223,15 @@ class ShopeeClient:
         partner_key: str | None = None,
     ):
         """`loja` e a chave do canal em config.yaml (ex.: "shopee_1") - define
-        o arquivo/linha de tokens. partner_id/partner_key sao compartilhados
-        (1 app Shopee Open Platform pra todas as lojas), vem do .env por
-        padrao (SHOPEE_PARTNER_ID/SHOPEE_PARTNER_KEY)."""
+        o arquivo/linha de tokens. Cada loja Shopee tem seu PROPRIO app/partner_id
+        no Open Platform Console (a Shopee so libera 1 app por conta de
+        desenvolvedor) - vem do .env por padrao
+        (SHOPEE_PARTNER_ID_{LOJA}/SHOPEE_PARTNER_KEY_{LOJA}, ex.:
+        SHOPEE_PARTNER_ID_SHOPEE_1)."""
         self.loja = loja
         self.ambiente = ambiente
-        self.partner_id = partner_id or _env_partner_id()
-        self.partner_key = partner_key or _env_partner_key()
+        self.partner_id = partner_id or _env_partner_id(loja)
+        self.partner_key = partner_key or _env_partner_key(loja)
 
     def _tokens_validos(self) -> dict:
         tokens = _carregar_tokens(self.loja)
@@ -314,22 +313,104 @@ class ShopeeClient:
 
     def obter_escrow_detalhe(self, order_sn: str) -> dict:
         """/api/v2/payment/get_escrow_detail - onde ficam comissao/taxas
-        reais cobradas pela Shopee nesse pedido (campo order_income).
-        NOMES DE CAMPO AINDA NAO CONFIRMADOS contra resposta real - usar
-        --debug-escrow contra um pedido de verdade antes de usar em
-        obter_detalhe_financeiro_pedido."""
+        reais cobradas pela Shopee nesse pedido (campo order_income). Nomes
+        de campo confirmados em 27/09/2026 - ver obter_detalhe_financeiro_pedido."""
         return self._get("/api/v2/payment/get_escrow_detail", {"order_sn": order_sn})
 
+    def obter_tacos_periodo(self, dias: int = 29) -> tuple[float, float]:
+        """/api/v2/ads/get_all_cpc_ads_daily_performance - desempenho diario
+        de Ads da loja inteira (todas as campanhas). Confirmado ao vivo em
+        27/09/2026: `expense` = gasto de Ads no dia, `broad_gmv` = faturamento
+        da loja inteira no dia (nao so o atribuido ao clique do anuncio -
+        broad_gmv e o numero certo pro TACOS = gasto Ads / faturamento total,
+        diferente de direct_gmv que so conta venda originada do clique).
+
+        Retorna (gasto_total, faturamento_total) somados no periodo - quem
+        chama calcula o % (round(gasto/faturamento*100, 2)).
+
+        A Shopee rejeita janela > 1 mes exato - por isso o padrao e 29 dias,
+        nao 30 (30 as vezes da "Date range can't be longer than 1 month").
+        Esse endpoint tem rate limit mais apertado que os outros da API -
+        chamar no maximo 1-2x ao dia (ver shopee_ads_pct_job.py), nunca a
+        cada ciclo do monitor."""
+        fim = datetime.now(timezone.utc).date()
+        inicio = fim - timedelta(days=dias)
+        resp = self._get(
+            "/api/v2/ads/get_all_cpc_ads_daily_performance",
+            {"start_date": inicio.strftime("%d-%m-%Y"), "end_date": fim.strftime("%d-%m-%Y")},
+        )
+        dias_resp = resp.get("response") or []
+        gasto_total = sum(float(d.get("expense") or 0) for d in dias_resp)
+        gmv_total = sum(float(d.get("broad_gmv") or 0) for d in dias_resp)
+        return gasto_total, gmv_total
+
+    def obter_campanhas_com_metricas(self, dias: int = 7) -> list[dict]:
+        """Combina get_product_level_campaign_id_list (lista de campanhas)
+        + get_product_campaign_daily_performance (metricas diarias, somadas
+        aqui pro periodo) - confirmado real em 27/09/2026. Diferente do
+        Mercado Livre, a Shopee nao devolve o total do periodo pronto, so
+        dia a dia (por isso soma manual). campaign_id_list aceita no maximo
+        100 por chamada (documentado) - pagina em lotes.
+
+        Retorna 1 dict por campanha: {campaign_id, gasto, faturamento
+        (broad_gmv), roas (broad_roi), tacos (gasto/faturamento em %)}."""
+        lista = self._get("/api/v2/ads/get_product_level_campaign_id_list", {"ad_type": "all"})
+        campanha_ids = [str(c["campaign_id"]) for c in (lista.get("response", {}).get("campaign_list") or [])]
+        if not campanha_ids:
+            return []
+
+        fim = datetime.now(timezone.utc).date()
+        inicio = fim - timedelta(days=dias)
+        resultado: list[dict] = []
+        for i in range(0, len(campanha_ids), 100):
+            lote = campanha_ids[i : i + 100]
+            resp = self._get(
+                "/api/v2/ads/get_product_campaign_daily_performance",
+                {
+                    "start_date": inicio.strftime("%d-%m-%Y"),
+                    "end_date": fim.strftime("%d-%m-%Y"),
+                    "campaign_id_list": ",".join(lote),
+                },
+            )
+            for campanha in resp.get("response", {}).get("campaign_list") or []:
+                dias_metricas = campanha.get("metrics_list") or []
+                gasto = sum(float(d.get("expense") or 0) for d in dias_metricas)
+                faturamento = sum(float(d.get("broad_gmv") or 0) for d in dias_metricas)
+                resultado.append(
+                    {
+                        "campaign_id": campanha.get("campaign_id"),
+                        "ad_name": campanha.get("ad_name"),
+                        "gasto": gasto,
+                        "faturamento": faturamento,
+                        "tacos": round(gasto / faturamento * 100, 2) if faturamento else 0.0,
+                        "roas": round(faturamento / gasto, 2) if gasto else 0.0,
+                    }
+                )
+        return resultado
+
     def obter_detalhe_financeiro_pedido(self, order_sn: str) -> DetalheFinanceiroPedidoShopee:
-        """AINDA NAO CALIBRADO - ver aviso no topo do arquivo. Rodar:
-            python shopee_client.py --loja <loja> --debug-escrow <order_sn>
-        contra um pedido real (sandbox ou producao) primeiro, conferir os
-        nomes de campo de comissao/frete/ads em order_income, e so entao
-        preencher a extracao aqui (mesmo processo ja feito com o
-        Mercado Livre - ver ml_client.py.obter_detalhe_financeiro_pedido)."""
-        raise NotImplementedError(
-            "Ainda nao calibrado contra pedido real - rode "
-            f"'python shopee_client.py --loja {self.loja} --debug-escrow <order_sn>' primeiro."
+        """Calibrado em 27/09/2026 contra pedido real da Shopee 1 (COMPLETED,
+        260913UCJ09P0K) - ver get_escrow_detail.response.order_income:
+          - escrow_amount: valor liquido que CAI NA CONTA do vendedor - ja vem
+            com commission_fee, service_fee (inclui taxa de Ads/tecnica) e
+            taxa de protecao de frete todos descontados pela propria Shopee
+            (diferente do Mercado Livre, aqui NAO precisa recalcular ads por
+            fora - conferido matematicamente: 27.99 - 5.04 - 5.54 - 0.49 -
+            0.56 = 16.36 = escrow_amount exato).
+          - order_selling_price: valor de venda bruto (o que o comprador
+            pagaria sem desconto pago pela Shopee, equivalente ao
+            "valor_venda" usado no Ads% do Mercado Livre).
+          - commission_fee: comissao da Shopee.
+          - actual_shipping_fee: custo real do frete (mesmo quando o
+            comprador paga R$0 - a Shopee subsidia via shopee_shipping_rebate,
+            que ja esta refletido dentro do escrow_amount)."""
+        resp = self.obter_escrow_detalhe(order_sn)
+        income = resp["response"]["order_income"]
+        return DetalheFinanceiroPedidoShopee(
+            receita_liquida=float(income["escrow_amount"]),
+            valor_venda=float(income["order_selling_price"]),
+            comissao_real=float(income["commission_fee"]),
+            frete_real=float(income["actual_shipping_fee"]),
         )
 
 
@@ -353,15 +434,15 @@ def _main():
     redirect_uri = os.environ["SHOPEE_REDIRECT_URI"]
 
     if args.auth_url:
-        print(montar_url_autorizacao(_env_partner_id(), _env_partner_key(), redirect_uri, args.ambiente))
+        print(montar_url_autorizacao(_env_partner_id(args.loja), _env_partner_key(args.loja), redirect_uri, args.ambiente))
     elif args.exchange_code:
         if not args.shop_id:
             raise SystemExit("--shop-id e obrigatorio junto com --exchange-code (veio na URL de redirect)")
         tokens = trocar_code_por_token(
-            args.loja, _env_partner_id(), _env_partner_key(), args.exchange_code, args.shop_id, args.ambiente
+            args.loja, _env_partner_id(args.loja), _env_partner_key(args.loja), args.exchange_code, args.shop_id, args.ambiente
         )
         print(f"Tokens salvos em {_tokens_path(args.loja)}")
-        print(json.dumps({k: v for k, v in tokens.items() if k != "access_token"}, indent=2))
+        print(json.dumps({k: v for k, v in tokens.items() if k not in ("access_token", "refresh_token")}, indent=2))
     elif args.debug_pedido:
         cliente = ShopeeClient(args.loja, args.ambiente)
         pedido = cliente.obter_detalhe_pedido(args.debug_pedido)

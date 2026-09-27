@@ -32,6 +32,7 @@ from categoria_produto import recalcular_categoria_pendente
 from custo_planilha import recalcular_custo_pendente, sobrepor_custos_do_dashboard
 from margin_engine import calcular_margem
 from ml_client import MLApiError, MLClient
+from shopee_pedidos import processar_loja_shopee
 from tiny_client import TinyApiError, TinyClient
 
 logging.basicConfig(
@@ -118,6 +119,12 @@ def processar_conta(conta_tiny: str, cliente: TinyClient, canais_config: dict, c
         canal = cliente.identificar_canal(pedido_completo, canais_config)
         if canal is None:
             logger.warning("[%s] Pedido %s sem canal identificado - pulando", conta_tiny, id_tiny)
+            continue
+
+        if canais_config[canal].get("fonte_pedido") == "shopee":
+            # Esse canal usa a API da Shopee como fonte (ver shopee_pedidos.py,
+            # chamado em separado no main()) - o Tiny so serve pra identificar
+            # que o canal existe, nunca grava pedido/margem a partir daqui.
             continue
 
         itens = cliente.montar_itens(pedido_completo, custos)
@@ -223,6 +230,14 @@ def main():
             # (aqui ou dentro de processar_conta) nunca pode impedir as
             # outras 3 contas de rodar no mesmo ciclo.
             logger.exception("[%s] Erro inesperado processando a conta - pulando pro proximo ciclo", conta_tiny)
+
+        for loja, canal_cfg in conta_cfg["canais"].items():
+            if canal_cfg.get("fonte_pedido") != "shopee":
+                continue
+            try:
+                total += processar_loja_shopee(loja, conta_tiny, canal_cfg, config, custos)
+            except Exception:
+                logger.exception("[%s] Erro inesperado processando a loja Shopee - pulando pro proximo ciclo", loja)
 
     logger.info("Ciclo concluido: %d pedido(s) processado(s) no total", total)
 

@@ -160,6 +160,12 @@ def processar_ciclo_conta(
             logger.warning("[%s] Pedido %s sem canal identificado - pulando", conta_tiny, id_tiny)
             continue
 
+        if canais_config[canal].get("fonte_pedido") == "shopee":
+            # Esse canal usa a API da Shopee como fonte (ver shopee_pedidos.py,
+            # chamado em separado no main()) - o Tiny so serve pra identificar
+            # que o canal existe, nunca grava pedido/margem a partir daqui.
+            continue
+
         itens = cliente.montar_itens(pedido_completo, custos)
         receita, canal_config_efetivo, detalhe_ml = _resolver_receita_e_config(
             pedido_completo, canal, canais_config[canal], ml_clientes

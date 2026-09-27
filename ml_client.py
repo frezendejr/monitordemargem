@@ -30,6 +30,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
@@ -324,6 +325,42 @@ class MLClient:
             resultados = resp.json().get("results") or []
             encontrados.update(r["item_id"] for r in resultados)
         return encontrados
+
+    def obter_campanhas_com_metricas(self, advertiser_id: int, dias: int = 7) -> list[dict]:
+        """/advertising/MLB/advertisers/{id}/product_ads/campaigns/search
+        com date_from/date_to/metrics - confirmado real em 27/09/2026 (o
+        endpoint sem esses parametros so devolve metadado da campanha, sem
+        metricas - precisa passar os 3 juntos). Cada resultado vem com um
+        campo "metrics" contendo cost/total_amount/acos/roas/units_quantity
+        ja calculados pela API pro periodo pedido - nao precisa somar dia a
+        dia como a Shopee. acos = TACOS (gasto/faturamento, em %)."""
+        access_token = self._access_token_valido()
+        fim = date.today()
+        inicio = fim - timedelta(days=dias)
+        campanhas: list[dict] = []
+        offset = 0
+        while True:
+            resp = requests.get(
+                f"{BASE_URL}/advertising/MLB/advertisers/{advertiser_id}/product_ads/campaigns/search",
+                headers={"Authorization": f"Bearer {access_token}", "Api-Version": "1"},
+                params={
+                    "date_from": inicio.isoformat(),
+                    "date_to": fim.isoformat(),
+                    "metrics": "clicks,prints,cost,acos,roas,total_amount,units_quantity",
+                    "limit": 50,
+                    "offset": offset,
+                },
+                timeout=15,
+            )
+            if not resp.ok:
+                raise MLApiError(f"Falha ao buscar campanhas com metricas: {resp.status_code} {resp.text}")
+            corpo = resp.json()
+            campanhas.extend(corpo.get("results") or [])
+            paging = corpo.get("paging") or {}
+            offset += paging.get("limit", 50)
+            if offset >= paging.get("total", 0):
+                break
+        return campanhas
 
     def obter_categoria(self, category_id: str) -> dict:
         """Detalhe da categoria (nome + path_from_root, a hierarquia

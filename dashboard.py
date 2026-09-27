@@ -89,6 +89,78 @@ def carregar_tabela(nome: str) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+@st.cache_data(ttl=300)
+def carregar_ads_campanhas() -> pd.DataFrame:
+    """Snapshot mais recente (ultimos 7 dias, recalculado 1x ao dia - ver
+    ads_monitor_job.py) de gasto/faturamento/ROAS/TACOS por campanha."""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    resp = requests.get(
+        f"{url}/rest/v1/margin_monitor_ads_campanhas",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        params={"select": "*", "order": "gasto.desc"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return pd.DataFrame(resp.json())
+
+
+META_TACOS_ADS = 10.0
+META_ROAS_ADS = 5.0
+
+
+def _renderizar_aba_ads(df_todas: pd.DataFrame, marketplace: str) -> None:
+    df = df_todas[df_todas["marketplace"] == marketplace].copy()
+    if df.empty:
+        st.info("Nenhuma campanha encontrada ainda - o job diário (ads_monitor_job.py) ainda não rodou pra essa loja/conta.")
+        return
+
+    for col in ("gasto", "faturamento", "roas", "tacos"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["alerta"] = df.apply(lambda r: "🔴" if r["tacos"] > META_TACOS_ADS or r["roas"] < META_ROAS_ADS else "🟢", axis=1)
+
+    gasto_total = df["gasto"].sum()
+    faturamento_total = df["faturamento"].sum()
+    tacos_geral = round(gasto_total / faturamento_total * 100, 2) if faturamento_total else 0.0
+    fora_da_meta = int((df["tacos"] > META_TACOS_ADS).sum())
+    roas_baixo = int((df["roas"] < META_ROAS_ADS).sum())
+
+    st.caption(f"Últimos {int(df['dias_periodo'].iloc[0]) if not df.empty else 7} dias · meta: TACOS ≤ {META_TACOS_ADS:.0f}% e ROAS ≥ {META_ROAS_ADS:.0f}")
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Gasto em Ads (todas as contas)", f"R$ {gasto_total:,.2f}")
+    col2.metric("Faturamento atribuído", f"R$ {faturamento_total:,.2f}")
+    col3.metric(
+        "TACOS geral",
+        f"{tacos_geral:.1f}%",
+        delta=f"{tacos_geral - META_TACOS_ADS:+.1f}pp vs meta",
+        delta_color="inverse",
+    )
+    col4.metric("Campanhas c/ TACOS > meta", fora_da_meta)
+    col5.metric("Campanhas c/ ROAS < meta", roas_baixo)
+
+    contas = sorted(df["conta"].unique())
+    conta_selecionada = st.selectbox("Ver por conta", ["Todas as contas (consolidado)"] + contas, key=f"conta_ads_{marketplace}")
+    df_filtrado = df if conta_selecionada.startswith("Todas") else df[df["conta"] == conta_selecionada]
+
+    df_filtrado = df_filtrado.sort_values(["alerta", "tacos"], ascending=[True, False])
+    colunas = ["alerta", "conta", "campanha_nome", "gasto", "faturamento", "tacos", "roas"]
+    st.dataframe(
+        df_filtrado[colunas],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "alerta": "",
+            "conta": "Conta",
+            "campanha_nome": "Campanha",
+            "gasto": st.column_config.NumberColumn("Gasto Ads", format="R$ %.2f"),
+            "faturamento": st.column_config.NumberColumn("Faturamento", format="R$ %.2f"),
+            "tacos": st.column_config.NumberColumn("TACOS", format="%.1f%%"),
+            "roas": st.column_config.NumberColumn("ROAS", format="%.2fx"),
+        },
+    )
+
+
 SEM_CATEGORIA = "Sem categoria"
 
 
@@ -885,8 +957,9 @@ if pedidos_f.empty:
 # Abas
 # ----------------------------------------------------------------------
 
-aba_visao, aba_metas, aba_produtos, aba_custos, aba_vendas = st.tabs(
-    ["📈 Visão geral", "📅 Metas diárias", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas"]
+aba_visao, aba_metas, aba_produtos, aba_custos, aba_vendas, aba_ads_ml, aba_ads_shopee = st.tabs(
+    ["📈 Visão geral", "📅 Metas diárias", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas",
+     "📢 Ads Mercado Livre", "📢 Ads Shopee"]
 )
 
 canais_todos = sorted(pedidos["canal"].dropna().unique())
@@ -1726,3 +1799,23 @@ with aba_vendas:
             "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
         },
     )
+
+# ---- Ads Mercado Livre / Shopee -----------------------------------------
+try:
+    ads_campanhas = carregar_ads_campanhas()
+except Exception:
+    ads_campanhas = pd.DataFrame()
+
+with aba_ads_ml:
+    st.subheader("📢 Monitor de Ads — Mercado Livre")
+    if ads_campanhas.empty:
+        st.info("Sem dados ainda - o job diário (ads_monitor_job.py) ainda não rodou.")
+    else:
+        _renderizar_aba_ads(ads_campanhas, "mercado_livre")
+
+with aba_ads_shopee:
+    st.subheader("📢 Monitor de Ads — Shopee")
+    if ads_campanhas.empty:
+        st.info("Sem dados ainda - o job diário (ads_monitor_job.py) ainda não rodou.")
+    else:
+        _renderizar_aba_ads(ads_campanhas, "shopee")
