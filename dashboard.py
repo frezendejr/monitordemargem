@@ -166,6 +166,7 @@ def _renderizar_aba_ads(df_todas: pd.DataFrame, marketplace: str) -> None:
 
 ESTOQUE_INICIAL_MINIBIKE = 3180  # recebido em 02/10/2026
 LIBERACAO_MINIBIKE = (date(2026, 10, 2), hora_do_dia(20, 0))  # liberado pra venda as 20h de 02/10
+META_DIA_MINIBIKE = 30  # un/dia
 
 
 def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
@@ -173,8 +174,9 @@ def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
     dos filtros de periodo/canal da barra lateral (e controle de lancamento,
     acompanha desde a liberacao)."""
     st.subheader("🚴 Controle — Minibike")
-    with st.expander("⚙️ Parâmetros (estoque recebido e liberação pra venda)"):
-        c1, c2, c3 = st.columns(3)
+    with st.expander("⚙️ Parâmetros (estoque recebido, liberação pra venda e meta)"):
+        c1, c2, c3, c4 = st.columns(4)
+        meta = c4.number_input("Meta (un/dia)", min_value=1, value=META_DIA_MINIBIKE, step=1, key="mb_meta")
         estoque = c1.number_input("Estoque recebido (peças)", min_value=0, value=ESTOQUE_INICIAL_MINIBIKE, step=10, key="mb_estoque")
         dia_lib = c2.date_input("Data de liberação", value=LIBERACAO_MINIBIKE[0], key="mb_dia")
         hora_lib = c3.time_input("Hora de liberação", value=LIBERACAO_MINIBIKE[1], key="mb_hora")
@@ -186,12 +188,25 @@ def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
         return
 
     margem_total = float(r.por_canal.loc[r.por_canal["canal"] == "TOTAL", "margem"].iloc[0])
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric("Unidades", f"{r.unidades:,.0f}".replace(",", "."))
     k2.metric("Margem", f"R$ {margem_total:,.0f}")
     k3.metric("Margem/unid.", f"R$ {margem_total / r.unidades:,.0f}")
     k4.metric("Estoque", f"{r.estoque_atual:,.0f}".replace(",", "."), delta=f"de {r.estoque_inicial:,.0f}".replace(",", "."), delta_color="off")
     k5.metric("Dias de estoque", f"{r.dias_estoque:,.0f}" if r.dias_estoque else "—")
+    if r.ritmo_dia is not None:
+        k6.metric(
+            f"Ritmo vs meta ({meta}/dia)",
+            f"{r.ritmo_dia:,.1f} un/dia".replace(".", ","),
+            delta=f"{r.ritmo_dia / meta * 100 - 100:+,.0f}% da meta".replace(",", "."),
+        )
+        faltam = f"{max(meta - r.ritmo_dia, 0):.1f}".replace(".", ",")
+        estoque_fmt = f"{r.estoque_atual:,.0f}".replace(",", ".")
+        st.caption(
+            f"Meta de **{meta} un/dia**: atingimento de **{r.ritmo_dia / meta * 100:.0f}%** · faltam **{faltam} un/dia** pra bater · "
+            f"vendendo a meta, o estoque de {estoque_fmt} dura **{r.estoque_atual / meta:.0f} dias** "
+            f"(esgota por volta de {(datetime.now(FUSO_BRASILIA) + timedelta(days=r.estoque_atual / meta)):%d/%m/%Y})."
+        )
 
     if r.dias_estoque:
         faixa = (
@@ -223,8 +238,9 @@ def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
     )
 
     st.markdown("###### Vendas por dia — ajustadas pelas horas em que o produto esteve à venda")
+    por_dia = r.por_dia.assign(pct_meta=(r.por_dia["equiv_dia"] / meta * 100).round(0))
     st.dataframe(
-        r.por_dia,
+        por_dia,
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -232,6 +248,7 @@ def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
             "unidades": st.column_config.NumberColumn("Unidades", format="%d"),
             "horas_expostas": st.column_config.NumberColumn("Horas à venda", format="%.1f h"),
             "equiv_dia": st.column_config.NumberColumn("Equivalente por dia (un/h × 24)", format="%.1f"),
+            "pct_meta": st.column_config.NumberColumn("% da meta", format="%d%%"),
         },
     )
 
@@ -241,7 +258,7 @@ def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
         "Por que não 'vendas por dia': o estoque só foi liberado às 20h de 02/10, então o dia 02 teve poucas horas de venda "
         "e a média por dia calendário subestimaria o ritmo. Aqui o ritmo é por hora de exposição. Hora da venda = hora em que o "
         "monitor gravou o pedido (~5 min). Estoque atual = recebido − vendido nos marketplaces monitorados (não enxerga outras saídas). "
-        "Amazon: comissão/frete ainda não configurados no monitor, então a margem dela está superestimada; ML e Shopee usam valores reais."
+        "Amazon: comissão 15% + tarifa DBA (peso estimado, ver config.yaml); ML e Shopee usam valores reais."
     )
 
 
