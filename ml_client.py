@@ -30,7 +30,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -215,6 +215,46 @@ class MLClient:
         if not resp.ok:
             raise MLApiError(f"Falha ao obter pedido {order_id}: {resp.status_code} {resp.text}")
         return resp.json()
+
+    def buscar_pedidos_pagos_atualizados(self, desde: datetime, ate: datetime) -> list[dict]:
+        """/orders/search do vendedor dessa conta - pedidos PAGOS cujo
+        date_last_updated cai em [desde, ate] (equivalente ao
+        buscar_pedidos_atualizados_desde do Tiny). Devolve os pedidos
+        completos (order_items, payments, pack_id, date_created...), ja
+        ordenados do mais antigo pro mais novo. Datas em UTC (aware)."""
+        access_token = self._access_token_valido()
+        headers = {"Authorization": f"Bearer {access_token}"}
+        resp = requests.get(f"{BASE_URL}/users/me", headers=headers, timeout=15)
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter seller_id de '{self.conta}': {resp.status_code} {resp.text}")
+        seller_id = resp.json()["id"]
+
+        fmt = "%Y-%m-%dT%H:%M:%S.000-00:00"
+        pedidos: list[dict] = []
+        offset = 0
+        while True:
+            resp = requests.get(
+                f"{BASE_URL}/orders/search",
+                headers=headers,
+                params={
+                    "seller": seller_id,
+                    "order.status": "paid",
+                    "order.date_last_updated.from": desde.astimezone(timezone.utc).strftime(fmt),
+                    "order.date_last_updated.to": ate.astimezone(timezone.utc).strftime(fmt),
+                    "sort": "date_asc",
+                    "limit": 50,
+                    "offset": offset,
+                },
+                timeout=30,
+            )
+            if not resp.ok:
+                raise MLApiError(f"Falha ao buscar pedidos de '{self.conta}': {resp.status_code} {resp.text}")
+            corpo = resp.json()
+            pedidos.extend(corpo.get("results") or [])
+            offset += 50
+            if offset >= (corpo.get("paging") or {}).get("total", 0):
+                break
+        return pedidos
 
     def obter_pagamento(self, payment_id: str) -> dict:
         """Detalhe do pagamento via Mercado Pago (mesmo token do ML no

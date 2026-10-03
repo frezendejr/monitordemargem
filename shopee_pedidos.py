@@ -39,6 +39,11 @@ from shopee_client import ShopeeApiError, ShopeeClient
 logger = logging.getLogger(__name__)
 
 FUSO_BRASILIA = timezone(timedelta(hours=-3))
+# Pedido CRIADO antes da virada pra API direta e historico do Tiny - a Shopee reenvia
+# pedido antigo quando ele muda de status e as linhas antigas do Tiny nao tem o
+# order_sn gravado (so numero do Tiny), entao a checagem por numero_ecommerce nao
+# pega: ~200 pedidos de ago/set entraram de novo como duplicata (achado em 03/10/2026).
+CORTE_CRIACAO_TS = int(datetime(2026, 9, 27, 0, 0, tzinfo=FUSO_BRASILIA).timestamp())
 JANELA_MAXIMA_SEGUNDOS = 15 * 86400 - 3600  # 15 dias com 1h de folga de seguranca
 STATUS_SEM_ESCROW = {"UNPAID", "CANCELLED", "INVOICE_PENDING"}
 
@@ -124,6 +129,8 @@ def processar_loja_shopee(loja: str, conta_tiny: str, canal_config: dict, config
 
         try:
             detalhe = cliente.obter_detalhe_pedido(order_sn)["response"]["order_list"][0]
+            if detalhe["create_time"] < CORTE_CRIACAO_TS:
+                continue
             financeiro = cliente.obter_detalhe_financeiro_pedido(order_sn)
         except ShopeeApiError:
             logger.exception("[%s] Falha ao obter detalhe/escrow do pedido %s - tenta de novo no proximo ciclo", loja, order_sn)
