@@ -120,3 +120,26 @@ def test_rateio_por_item_marca_custo_ausente_so_no_item_sem_custo():
     item_sem = next(i for i in resultado.itens if i.sku == "SEM_CUSTO")
     assert item_com.custo_ausente is False
     assert item_sem.custo_ausente is True
+
+
+def test_frete_fixo_por_unidade_por_sku_amazon():
+    # Simulacao Amazon real: R$ 139,99, comissao 15% (21,00), logistica 19,95, custo 53,77
+    config = {
+        "comissao_pct": 15.0,
+        "frete_por_unidade_sku": [{"padrao": "minibike|pj198", "valor": 19.95}],
+    }
+    itens = [ItemPedido(sku="minibike-c1-dba", quantidade=1, valor_unitario=139.99, custo_unitario=53.77)]
+    r = calcular_margem("1", "amazon", itens, receita=139.99, canal_config=config)
+    assert r.comissao == 21.00
+    assert r.frete == 19.95
+    assert r.margem_contribuicao == pytest.approx(45.27, abs=0.01)  # igual a simulacao (sem imposto)
+
+
+def test_frete_fixo_multiplica_por_quantidade_e_ignora_outros_skus():
+    config = {"frete_por_unidade_sku": [{"padrao": "minibike", "valor": 19.95}]}
+    itens = [
+        ItemPedido(sku="MINIBIKE-X", quantidade=2, valor_unitario=100, custo_unitario=10),
+        ItemPedido(sku="lixeira-1", quantidade=3, valor_unitario=20, custo_unitario=5),
+    ]
+    r = calcular_margem("2", "amazon", itens, receita=260, canal_config=config)
+    assert r.frete == pytest.approx(39.90)  # so as 2 un do minibike

@@ -19,6 +19,7 @@ que o Tiny enxergue, como no TikTok Shop) em vez de recalcular a partir dos
 itens - ver ResultadoMargem/calcular_margem.
 """
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -82,6 +83,21 @@ def _percentual_frete(receita: float, canal_config: dict) -> float:
     return faixas[-1]["frete_pct"]
 
 
+def _frete_fixo_por_sku(itens: list[ItemPedido], canal_config: dict) -> float:
+    """Tarifa logistica em R$ POR UNIDADE que depende do produto (ex.: Amazon cobra
+    um valor fixo por peso/tamanho, nao um % do preco). canal_config:
+        frete_por_unidade_sku: [{padrao: "minibike|pj198", valor: 19.95}, ...]
+    `padrao` e regex (sem diferenciar maiuscula) aplicada no SKU; vale a primeira
+    regra que casar. SKU sem regra nao paga nada aqui (cai so no frete_pct)."""
+    total = 0.0
+    for item in itens:
+        for regra in canal_config.get("frete_por_unidade_sku") or []:
+            if re.search(regra["padrao"], item.sku, re.IGNORECASE):
+                total += item.quantidade * float(regra["valor"])
+                break
+    return total
+
+
 def calcular_margem(
     numero_pedido: str,
     canal: str,
@@ -112,7 +128,7 @@ def calcular_margem(
 
     imposto = receita * imposto_pct / 100
     comissao = receita * comissao_pct / 100
-    frete = receita * frete_pct / 100
+    frete = receita * frete_pct / 100 + _frete_fixo_por_sku(itens, canal_config)
     ads = receita * ads_pct / 100
 
     margem_contribuicao = receita - cmv - imposto - comissao - frete - ads
