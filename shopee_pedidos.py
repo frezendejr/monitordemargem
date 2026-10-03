@@ -25,7 +25,10 @@ projeto, ver margin_engine.py).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
+
+import requests
 
 import storage_supabase as storage
 import supabase_writer
@@ -35,8 +38,26 @@ from shopee_client import ShopeeApiError, ShopeeClient
 
 logger = logging.getLogger(__name__)
 
+FUSO_BRASILIA = timezone(timedelta(hours=-3))
 JANELA_MAXIMA_SEGUNDOS = 15 * 86400 - 3600  # 15 dias com 1h de folga de seguranca
 STATUS_SEM_ESCROW = {"UNPAID", "CANCELLED", "INVOICE_PENDING"}
+
+
+def _ja_gravado_via_tiny(loja: str, order_sn: str) -> bool:
+    """Pedidos anteriores a virada pra API direta (27/09/2026) estao gravados com o
+    numero do Tiny, e o order_sn da Shopee fica em numero_ecommerce. A Shopee reenvia
+    pedido antigo sempre que ele muda de status - sem essa checagem ele entrava de novo
+    como duplicata (mesma venda contada 2x, achado em 03/10/2026)."""
+    url = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    resp = requests.get(
+        f"{url}/rest/v1/margin_monitor_itens",
+        params={"canal": f"eq.{loja}", "numero_ecommerce": f"eq.{order_sn}", "select": "numero_pedido", "limit": "1"},
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return len(resp.json()) > 0
 
 
 def _sku_do_item(item: dict) -> str:
@@ -98,6 +119,8 @@ def processar_loja_shopee(loja: str, conta_tiny: str, canal_config: dict, config
             continue
         if order_status.get(order_sn) in STATUS_SEM_ESCROW:
             continue
+        if _ja_gravado_via_tiny(loja, order_sn):
+            continue
 
         try:
             detalhe = cliente.obter_detalhe_pedido(order_sn)["response"]["order_list"][0]
@@ -110,7 +133,10 @@ def processar_loja_shopee(loja: str, conta_tiny: str, canal_config: dict, config
             continue
 
         itens = _montar_itens(detalhe, custos)
-        data_pedido = datetime.fromtimestamp(detalhe["create_time"], tz=timezone.utc).strftime("%Y-%m-%d")
+        # DD/MM/AAAA em horario de Brasilia - mesmo formato que o Tiny/ML gravam e que
+        # o dashboard exige (pd.to_datetime format="%d/%m/%Y"); ISO ou UTC fazia a venda
+        # sumir dos filtros / cair no dia errado (bug real, achado em 03/10/2026).
+        data_pedido = datetime.fromtimestamp(detalhe["create_time"], tz=FUSO_BRASILIA).strftime("%d/%m/%Y")
 
         # Mesma tecnica do Mercado Livre (ver monitor_cloud.py): comissao/frete
         # exatos vem por fora, calcular_margem roda com essas duas zeradas pra
