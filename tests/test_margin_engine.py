@@ -122,24 +122,31 @@ def test_rateio_por_item_marca_custo_ausente_so_no_item_sem_custo():
     assert item_sem.custo_ausente is True
 
 
-def test_frete_fixo_por_unidade_por_sku_amazon():
-    # Simulacao Amazon real: R$ 139,99, comissao 15% (21,00), logistica 19,95, custo 53,77
+def test_dba_reproduz_simulacao_amazon():
+    # Simulacao real da Amazon: R$ 139,99, comissao 15% (21,00), logistica 19,95, custo 53,77
     config = {
         "comissao_pct": 15.0,
-        "frete_por_unidade_sku": [{"padrao": "minibike|pj198", "valor": 19.95}],
+        "dba": {"origem": "interior_sul_sudeste", "faixa_padrao": "1-2kg",
+                "faixas_por_sku": [{"padrao": "minibike|pj198", "faixa": "2-3kg"}]},
     }
     itens = [ItemPedido(sku="minibike-c1-dba", quantidade=1, valor_unitario=139.99, custo_unitario=53.77)]
     r = calcular_margem("1", "amazon", itens, receita=139.99, canal_config=config)
     assert r.comissao == 21.00
     assert r.frete == 19.95
-    assert r.margem_contribuicao == pytest.approx(45.27, abs=0.01)  # igual a simulacao (sem imposto)
+    assert r.margem_contribuicao == pytest.approx(45.27, abs=0.01)
 
 
-def test_frete_fixo_multiplica_por_quantidade_e_ignora_outros_skus():
-    config = {"frete_por_unidade_sku": [{"padrao": "minibike", "valor": 19.95}]}
+def test_dba_por_preco_peso_e_quantidade():
+    config = {"dba": {"origem": "interior_sul_sudeste", "faixa_padrao": "1-2kg"}}
     itens = [
-        ItemPedido(sku="MINIBIKE-X", quantidade=2, valor_unitario=100, custo_unitario=10),
-        ItemPedido(sku="lixeira-1", quantidade=3, valor_unitario=20, custo_unitario=5),
+        ItemPedido(sku="escorredor", quantidade=2, valor_unitario=29.80, custo_unitario=10),   # < R$30: R$4,50 fixo
+        ItemPedido(sku="sapato", quantidade=1, valor_unitario=188.00, custo_unitario=60),      # 79-199: 1-2kg interior = 18,75
+        ItemPedido(sku="sapato-caro", quantidade=1, valor_unitario=208.00, custo_unitario=60),  # >=200: 1-2kg interior = 23,45
     ]
-    r = calcular_margem("2", "amazon", itens, receita=260, canal_config=config)
-    assert r.frete == pytest.approx(39.90)  # so as 2 un do minibike
+    r = calcular_margem("2", "amazon", itens, receita=455.60, canal_config=config)
+    assert r.frete == pytest.approx(2 * 4.50 + 18.75 + 23.45)
+
+
+def test_sem_config_dba_nao_cobra_logistica():
+    itens = [ItemPedido(sku="x", quantidade=1, valor_unitario=100, custo_unitario=10)]
+    assert calcular_margem("3", "amazon", itens, receita=100, canal_config={}).frete == 0

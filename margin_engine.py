@@ -22,6 +22,8 @@ itens - ver ResultadoMargem/calcular_margem.
 import re
 from dataclasses import dataclass, field
 
+from amazon_dba import tarifa_dba
+
 
 @dataclass
 class ItemPedido:
@@ -83,18 +85,27 @@ def _percentual_frete(receita: float, canal_config: dict) -> float:
     return faixas[-1]["frete_pct"]
 
 
-def _frete_fixo_por_sku(itens: list[ItemPedido], canal_config: dict) -> float:
-    """Tarifa logistica em R$ POR UNIDADE que depende do produto (ex.: Amazon cobra
-    um valor fixo por peso/tamanho, nao um % do preco). canal_config:
-        frete_por_unidade_sku: [{padrao: "minibike|pj198", valor: 19.95}, ...]
-    `padrao` e regex (sem diferenciar maiuscula) aplicada no SKU; vale a primeira
-    regra que casar. SKU sem regra nao paga nada aqui (cai so no frete_pct)."""
+def _frete_dba(itens: list[ItemPedido], canal_config: dict) -> float:
+    """Tarifa logistica do DBA da Amazon (ver amazon_dba.py): valor em R$ por
+    UNIDADE que depende do preco do produto, do peso e da ORIGEM do envio - nao e
+    um % do preco. canal_config:
+        dba:
+          origem: interior_sul_sudeste        # de onde despachamos (Tijucas/SC)
+          faixa_padrao: "1-2kg"               # peso quando o SKU nao tem regra
+          faixas_por_sku:                     # opcional; regex no SKU, 1a que casar
+            - {padrao: "minibike|pj198", faixa: "2-3kg"}
+    Abaixo de R$ 79 a tarifa e fixa por preco e o peso nao importa."""
+    cfg = canal_config.get("dba")
+    if not cfg:
+        return 0.0
     total = 0.0
     for item in itens:
-        for regra in canal_config.get("frete_por_unidade_sku") or []:
+        faixa = cfg["faixa_padrao"]
+        for regra in cfg.get("faixas_por_sku") or []:
             if re.search(regra["padrao"], item.sku, re.IGNORECASE):
-                total += item.quantidade * float(regra["valor"])
+                faixa = regra["faixa"]
                 break
+        total += item.quantidade * tarifa_dba(item.valor_unitario, faixa, cfg["origem"])
     return total
 
 
@@ -128,7 +139,7 @@ def calcular_margem(
 
     imposto = receita * imposto_pct / 100
     comissao = receita * comissao_pct / 100
-    frete = receita * frete_pct / 100 + _frete_fixo_por_sku(itens, canal_config)
+    frete = receita * frete_pct / 100 + _frete_dba(itens, canal_config)
     ads = receita * ads_pct / 100
 
     margem_contribuicao = receita - cmv - imposto - comissao - frete - ads
