@@ -16,12 +16,15 @@ from __future__ import annotations
 import io
 import os
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as hora_do_dia
 
 import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+
+from minibike_controle import FUSO_BRASILIA, calcular_controle
 
 load_dotenv()
 
@@ -158,6 +161,87 @@ def _renderizar_aba_ads(df_todas: pd.DataFrame, marketplace: str) -> None:
             "tacos": st.column_config.NumberColumn("TACOS", format="%.1f%%"),
             "roas": st.column_config.NumberColumn("ROAS", format="%.2fx"),
         },
+    )
+
+
+ESTOQUE_INICIAL_MINIBIKE = 3180  # recebido em 02/10/2026
+LIBERACAO_MINIBIKE = (date(2026, 10, 2), hora_do_dia(20, 0))  # liberado pra venda as 20h de 02/10
+
+
+def _renderizar_controle_minibike(itens_todos: pd.DataFrame) -> None:
+    """Unidades/margem do minibike por marketplace + dias de estoque. Independe
+    dos filtros de periodo/canal da barra lateral (e controle de lancamento,
+    acompanha desde a liberacao)."""
+    st.subheader("🚴 Controle — Minibike")
+    with st.expander("⚙️ Parâmetros (estoque recebido e liberação pra venda)"):
+        c1, c2, c3 = st.columns(3)
+        estoque = c1.number_input("Estoque recebido (peças)", min_value=0, value=ESTOQUE_INICIAL_MINIBIKE, step=10, key="mb_estoque")
+        dia_lib = c2.date_input("Data de liberação", value=LIBERACAO_MINIBIKE[0], key="mb_dia")
+        hora_lib = c3.time_input("Hora de liberação", value=LIBERACAO_MINIBIKE[1], key="mb_hora")
+
+    liberacao = datetime.combine(dia_lib, hora_lib, tzinfo=FUSO_BRASILIA)
+    r = calcular_controle(itens_todos, estoque, liberacao, datetime.now(FUSO_BRASILIA))
+    if r.unidades == 0:
+        st.info("Nenhuma venda do minibike desde a liberação.")
+        return
+
+    margem_total = float(r.por_canal.loc[r.por_canal["canal"] == "TOTAL", "margem"].iloc[0])
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Unidades", f"{r.unidades:,.0f}".replace(",", "."))
+    k2.metric("Margem", f"R$ {margem_total:,.0f}")
+    k3.metric("Margem/unid.", f"R$ {margem_total / r.unidades:,.0f}")
+    k4.metric("Estoque", f"{r.estoque_atual:,.0f}".replace(",", "."), delta=f"de {r.estoque_inicial:,.0f}".replace(",", "."), delta_color="off")
+    k5.metric("Dias de estoque", f"{r.dias_estoque:,.0f}" if r.dias_estoque else "—")
+
+    if r.dias_estoque:
+        faixa = (
+            f"{r.dias_estoque_min:,.0f} a {r.dias_estoque_max:,.0f} dias"
+            if r.dias_estoque_max
+            else f"a partir de {r.dias_estoque_min:,.0f} dias"
+        )
+        ritmo_24h = f" · últimas 24h: {r.ritmo_24h:,.0f} un" if r.ritmo_24h is not None else " · (ainda sem 24h completas de venda)"
+        st.caption(
+            f"Ritmo: **{r.ritmo_dia:,.1f} un/dia** ({r.unidades:,.0f} un em {r.horas_expostas:,.1f}h de venda × 24){ritmo_24h}. "
+            f"Esgota por volta de **{r.esgota_em:%d/%m/%Y}** mantido o ritmo. "
+            f"Faixa de confiança (95%, pouca amostra = faixa larga): **{faixa}**."
+        )
+
+    tabela = r.por_canal.rename(columns={"canal": "Marketplace"})
+    st.dataframe(
+        tabela,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
+            "unidades": st.column_config.NumberColumn("Unidades", format="%d"),
+            "receita": st.column_config.NumberColumn("Receita", format="R$ %.2f"),
+            "cmv": st.column_config.NumberColumn("CMV", format="R$ %.2f"),
+            "margem": st.column_config.NumberColumn("Margem", format="R$ %.2f"),
+            "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
+            "margem_por_unid": st.column_config.NumberColumn("Margem / unidade", format="R$ %.2f"),
+        },
+    )
+
+    st.markdown("###### Vendas por dia — ajustadas pelas horas em que o produto esteve à venda")
+    st.dataframe(
+        r.por_dia,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "dia": st.column_config.DateColumn("Dia", format="DD/MM/YYYY"),
+            "unidades": st.column_config.NumberColumn("Unidades", format="%d"),
+            "horas_expostas": st.column_config.NumberColumn("Horas à venda", format="%.1f h"),
+            "equiv_dia": st.column_config.NumberColumn("Equivalente por dia (un/h × 24)", format="%.1f"),
+        },
+    )
+
+    if r.itens_sem_custo:
+        st.warning(f"{r.itens_sem_custo} item(ns) sem custo cadastrado - a margem deles está superestimada.")
+    st.caption(
+        "Por que não 'vendas por dia': o estoque só foi liberado às 20h de 02/10, então o dia 02 teve poucas horas de venda "
+        "e a média por dia calendário subestimaria o ritmo. Aqui o ritmo é por hora de exposição. Hora da venda = hora em que o "
+        "monitor gravou o pedido (~5 min). Estoque atual = recebido − vendido nos marketplaces monitorados (não enxerga outras saídas). "
+        "Amazon: comissão/frete ainda não configurados no monitor, então a margem dela está superestimada; ML e Shopee usam valores reais."
     )
 
 
@@ -1329,6 +1413,8 @@ with aba_visao:
                 "ativo no anúncio. Estoque zerado = produto sem variação com estoque em 0 - recomendado "
                 "pausar o anúncio. Por enquanto só alerta, não pausa nada sozinho."
             )
+
+    _renderizar_controle_minibike(itens)
 
     st.subheader("Faturamento e margem por marketplace")
     pedidos_f_mkt = pedidos_f.copy()
