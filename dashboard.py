@@ -13,6 +13,7 @@ Publicado no Streamlit Community Cloud, as mesmas 2 variaveis vao em
 
 from __future__ import annotations
 
+import html
 import io
 import os
 from datetime import date, datetime, timedelta, timezone
@@ -24,6 +25,7 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
+from indicadores import calcular_pa, pa_por_grupo, vendas_abaixo_custo
 from minibike_controle import FUSO_BRASILIA, calcular_controle
 
 load_dotenv()
@@ -589,6 +591,24 @@ def _kpi_card(titulo: str, valor: str, status: str = "neutral", sub: str | None 
     )
 
 
+def _fmt_pa(pa: float | None) -> str:
+    return f"{pa:.2f}".replace(".", ",") if pa is not None else "—"
+
+
+def _faixa_pa(itens_df: pd.DataFrame, contexto: str) -> None:
+    """Indicador P.A. (pares por atendimento) no topo de cada aba - mesmo
+    cartao de KPI da Visao geral, sempre neutro (nao ha meta de P.A.)."""
+    pa, pares, atendimentos = calcular_pa(itens_df)
+    col, _ = st.columns([1, 3])
+    with col:
+        _kpi_card(
+            "👟 P.A. — pares por atendimento",
+            _fmt_pa(pa),
+            "neutral",
+            sub=f"{pares:,.0f} par(es) em {atendimentos:,} atendimento(s)".replace(",", ".") + f" · {contexto}",
+        )
+
+
 # ----------------------------------------------------------------------
 # Metas (faturamento/margem POR MES E POR CANAL - a mistura entre canais e
 # uma decisao estrategica do time, ex.: "crescer Amazon, manter Shoppe 1",
@@ -1058,8 +1078,27 @@ if pedidos_f.empty:
 # Abas
 # ----------------------------------------------------------------------
 
-aba_visao, aba_metas, aba_produtos, aba_custos, aba_vendas, aba_ads_ml, aba_ads_shopee = st.tabs(
-    ["📈 Visão geral", "📅 Metas diárias", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas",
+abaixo_custo_monitor = vendas_abaixo_custo(itens_f)
+n_monitor = len(abaixo_custo_monitor)
+rotulo_monitor = f"🚨 Monitor de margem ({n_monitor})" if n_monitor else "✅ Monitor de margem"
+if n_monitor:
+    # Pisca a propria aba (2a da lista) em vermelho - da pra ver o alerta
+    # de qualquer outra aba, sem precisar abrir o Monitor.
+    st.markdown(
+        f"""
+        <style>
+        @keyframes piscar_aba_monitor {{ 0%, 100% {{ background-color: {_VERMELHO}; }} 50% {{ background-color: rgba(229,72,77,0.25); }} }}
+        .stTabs [data-baseweb="tab-list"] [data-baseweb="tab"]:nth-child(2) {{
+            animation: piscar_aba_monitor 1.1s infinite; border-radius: 8px 8px 0 0; padding: 0 12px;
+        }}
+        .stTabs [data-baseweb="tab-list"] [data-baseweb="tab"]:nth-child(2) p {{ color: white !important; font-weight: 700; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+aba_visao, aba_monitor, aba_metas, aba_produtos, aba_custos, aba_vendas, aba_ads_ml, aba_ads_shopee = st.tabs(
+    ["📈 Visão geral", rotulo_monitor, "📅 Metas diárias", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas",
      "📢 Ads Mercado Livre", "📢 Ads Shopee"]
 )
 
@@ -1067,6 +1106,8 @@ canais_todos = sorted(pedidos["canal"].dropna().unique())
 
 # ---- Visão geral -------------------------------------------------------
 with aba_visao:
+    _faixa_pa(itens_f, "filtro ao lado")
+
     # -- Meta do mes: cadastro (por canal) + comparativo com o realizado --
     try:
         metas_por_mes = carregar_metas()
@@ -1495,9 +1536,12 @@ with aba_visao:
     total_margem_conta = por_conta["margem"].abs().sum()
     por_conta["pct_receita"] = (por_conta["receita"] / total_receita_conta * 100).round(1) if total_receita_conta else 0.0
     por_conta["pct_margem"] = (por_conta["margem"].abs() / total_margem_conta * 100).round(1) if total_margem_conta else 0.0
+    pa_conta = pa_por_grupo(itens_f, "canal")
+    pa_conta["conta"] = pa_conta["canal"].map(_nome_conta)
+    por_conta = por_conta.merge(pa_conta[["conta", "pa"]], on="conta", how="left")
     por_conta = por_conta.sort_values(["marketplace", "margem"], ascending=[True, False])
     st.dataframe(
-        por_conta[["marketplace", "conta", "receita", "pct_receita", "margem", "pct_margem", "margem_pct", "pedidos"]],
+        por_conta[["marketplace", "conta", "receita", "pct_receita", "margem", "pct_margem", "margem_pct", "pedidos", "pa"]],
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -1509,6 +1553,7 @@ with aba_visao:
             "pct_margem": st.column_config.NumberColumn("% da Margem", format="%.1f%%"),
             "margem_pct": st.column_config.NumberColumn("Margem %", format="%.1f%%"),
             "pedidos": "Pedidos",
+            "pa": st.column_config.NumberColumn("P.A.", format="%.2f", help="Pares por atendimento"),
         },
     )
 
@@ -1593,6 +1638,89 @@ with aba_visao:
         },
     )
 
+# ---- Monitor de margem -----------------------------------------------------
+with aba_monitor:
+    _faixa_pa(itens_f, "filtro ao lado")
+    st.caption(
+        "Toda venda em que a receita do item ficou ABAIXO do custo da mercadoria (CMV), no período e "
+        "contas/canais do filtro ao lado. Horário = quando o monitor detectou a venda (horário de "
+        "Brasília, ciclo de ~15 min) - o Tiny só expõe a data do pedido, não a hora. Clique em "
+        "🔄 Atualizar no topo pra reler agora."
+    )
+    if abaixo_custo_monitor.empty:
+        st.success("✅ Nenhuma venda abaixo do custo no período.")
+    else:
+        monitor = abaixo_custo_monitor.copy()
+        for coluna in ("numero_ecommerce", "data_pedido"):
+            if coluna not in monitor.columns:
+                monitor[coluna] = None
+        monitor["quantidade"] = pd.to_numeric(monitor["quantidade"], errors="coerce").fillna(0)
+        monitor["loja"] = monitor["canal"].map(_marketplace_generico) + " · " + monitor["canal"].map(_nome_conta)
+        monitor["venda"] = monitor.apply(
+            lambda r: f"{r['numero_ecommerce']} (Tiny {r['numero_pedido']})"
+            if pd.notna(r["numero_ecommerce"]) and str(r["numero_ecommerce"]).strip()
+            else f"Tiny {r['numero_pedido']}",
+            axis=1,
+        )
+        monitor["horario_fmt"] = monitor["horario"].dt.strftime("%d/%m %H:%M").fillna(monitor["data_pedido"].fillna("—"))
+
+        st.markdown(
+            f'<div class="alerta-monitor-margem">🚨 {n_monitor} venda(s) ABAIXO DO CUSTO · perda total '
+            f"{_fmt_moeda(monitor['perda'].sum())}</div>",
+            unsafe_allow_html=True,
+        )
+        _LIMITE_CARTOES = 30
+        cartoes = "".join(
+            f'<div class="monitor-card"><div class="monitor-hora">🕒 {r.horario_fmt}</div>'
+            f"<div><b>🏬 Loja:</b> {html.escape(r.loja)}</div>"
+            f"<div><b>🧾 Venda:</b> {html.escape(r.venda)}</div>"
+            f"<div><b>👟 Produto:</b> {html.escape(str(r.sku))} (código pai {html.escape(_codigo_pai(r.sku))}) · {r.quantidade:g} un.</div>"
+            f"<div><b>💸</b> vendeu por {_fmt_moeda(r.receita)} · custo {_fmt_moeda(r.cmv)} · "
+            f"<b>perda {_fmt_moeda(r.perda)}</b></div></div>"
+            for r in monitor.head(_LIMITE_CARTOES).itertuples()
+        )
+        st.markdown(
+            f"""
+            <style>
+            @keyframes piscar_monitor_margem {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.4; }} }}
+            .alerta-monitor-margem {{
+                animation: piscar_monitor_margem 1.1s infinite;
+                background-color: #d32f2f; color: white; padding: 16px; border-radius: 10px;
+                font-weight: 800; font-size: 1.15rem; text-align: center; margin-bottom: 12px;
+            }}
+            .monitor-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }}
+            .monitor-card {{
+                animation: piscar_monitor_margem 1.1s infinite;
+                background-color: rgba(229, 72, 77, 0.15); border: 2px solid {_VERMELHO};
+                border-radius: 10px; padding: 12px 14px; line-height: 1.55; font-size: 0.9rem;
+            }}
+            .monitor-hora {{ color: {_VERMELHO}; font-weight: 800; font-size: 1.05rem; margin-bottom: 4px; }}
+            </style>
+            <div class="monitor-grid">{cartoes}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if n_monitor > _LIMITE_CARTOES:
+            st.caption(f"Mostrando as {_LIMITE_CARTOES} mais recentes em cartão - todas as {n_monitor} estão na tabela abaixo.")
+
+        st.data_editor(
+            monitor[["horario_fmt", "loja", "venda", "sku", "quantidade", "receita", "cmv", "perda"]],
+            hide_index=True,
+            use_container_width=True,
+            disabled=True,
+            key="editor_monitor_margem",
+            column_config={
+                "horario_fmt": "Horário",
+                "loja": "Loja",
+                "venda": "Venda",
+                "sku": "Produto (SKU)",
+                "quantidade": "Qtd",
+                "receita": st.column_config.NumberColumn("Vendeu por", format="R$ %.2f"),
+                "cmv": st.column_config.NumberColumn("Custo", format="R$ %.2f"),
+                "perda": st.column_config.NumberColumn("Perda", format="R$ %.2f"),
+            },
+        )
+
 # ---- Metas diárias --------------------------------------------------------
 with aba_metas:
     st.caption(
@@ -1603,6 +1731,12 @@ with aba_metas:
     mes_relatorio = st.date_input(
         "Mês do relatório", value=_hoje_brasilia().replace(day=1), format="DD/MM/YYYY", key="mes_relatorio_diario"
     ).replace(day=1)
+
+    fim_mes_relatorio = _dias_do_mes(mes_relatorio)[-1]
+    _faixa_pa(
+        itens[(itens["data_pedido_dt"].dt.date >= mes_relatorio) & (itens["data_pedido_dt"].dt.date <= fim_mes_relatorio)],
+        f"todas as contas, {mes_relatorio.strftime('%m/%Y')}",
+    )
 
     metas_mes_relatorio = metas_por_mes.get(mes_relatorio, {})
     if not metas_mes_relatorio:
@@ -1649,6 +1783,7 @@ with aba_metas:
 
 # ---- Produtos -----------------------------------------------------------
 with aba_produtos:
+    _faixa_pa(itens_f, "filtro ao lado")
     if itens_f.empty:
         st.info("Sem dados de item no período selecionado.")
     else:
@@ -1739,6 +1874,7 @@ with aba_produtos:
 
 # ---- Custos pendentes ----------------------------------------------------
 with aba_custos:
+    _faixa_pa(itens_f, "filtro ao lado")
     sem_custo = itens_f[itens_f["custo_ausente"] == True]  # noqa: E712
 
     if sem_custo.empty:
@@ -1833,6 +1969,7 @@ with aba_custos:
 
 # ---- Venda a venda --------------------------------------------------------
 with aba_vendas:
+    _faixa_pa(itens_f, "filtro ao lado")
     coluna_ordenacao = "processado_em" if "processado_em" in pedidos_f.columns else "numero_pedido"
     tabela_vendas = pedidos_f.sort_values(coluna_ordenacao, ascending=False).copy()
 
@@ -1911,6 +2048,7 @@ except Exception:
 
 with aba_ads_ml:
     st.subheader("📢 Monitor de Ads — Mercado Livre")
+    _faixa_pa(itens_f[itens_f["canal"].map(_marketplace_generico) == "Mercado Livre"], "Mercado Livre, filtro ao lado")
     if ads_campanhas.empty:
         st.info("Sem dados ainda - o job diário (ads_monitor_job.py) ainda não rodou.")
     else:
@@ -1918,6 +2056,7 @@ with aba_ads_ml:
 
 with aba_ads_shopee:
     st.subheader("📢 Monitor de Ads — Shopee")
+    _faixa_pa(itens_f[itens_f["canal"].map(_marketplace_generico) == "Shopee"], "Shopee, filtro ao lado")
     if ads_campanhas.empty:
         st.info("Sem dados ainda - o job diário (ads_monitor_job.py) ainda não rodou.")
     else:

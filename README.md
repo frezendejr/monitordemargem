@@ -56,6 +56,17 @@ produtos por margem (melhores/piores SKUs). Le do **Supabase**, nao do
 SQLite local - o SQLite (`margem_monitor.db`) continua sendo so o controle
 operacional de dedupe/checkpoint do `monitor.py`.
 
+**Monitor de margem (aba propria):** lista, piscando em vermelho, toda venda
+em que a receita do item ficou abaixo do custo (CMV) - com loja
+(marketplace/conta), venda (nº no marketplace + pedido Tiny), produto (SKU)
+e horario. O horario e o momento em que o monitor detectou a venda (o Tiny
+so expoe a data do pedido). Com algum caso no periodo, a propria aba pisca
+em vermelho, visivel de qualquer outra aba.
+
+**P.A. (pares por atendimento):** aparece no topo de todas as abas (e por
+conta na tabela "Detalhado por conta"). P.A. = pares vendidos / pedidos,
+calculado sobre `margin_monitor_itens` (`indicadores.py`).
+
 ### 1. Rodar o SQL no Supabase (uma vez)
 
 Colar [`supabase_schema.sql`](supabase_schema.sql) no SQL Editor do projeto
