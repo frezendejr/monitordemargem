@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as hora_do_dia
 
@@ -61,35 +62,60 @@ def _hoje_brasilia() -> date:
 _PAGINA_SUPABASE = 1000
 
 
-@st.cache_data(ttl=120)
+def _buscar_pagina(url: str, headers: dict, nome: str, inicio: int, contar: bool = False) -> tuple[list[dict], int | None]:
+    h = {**headers, "Range": f"{inicio}-{inicio + _PAGINA_SUPABASE - 1}"}
+    if contar:
+        h["Prefer"] = "count=exact"
+    resp = requests.get(f"{url}/rest/v1/{nome}", headers=h, params={"select": "*", "order": "processado_em.desc"}, timeout=30)
+    resp.raise_for_status()
+    total = None
+    if contar:
+        try:
+            total = int(resp.headers.get("content-range", "").split("/")[1])
+        except (IndexError, ValueError):
+            total = None
+    return resp.json(), total
+
+
+# TTL 5 min (era 2): o monitor sincroniza a cada 5 min, e cada vez que o cache
+# vence quem mexe num filtro espera a releitura da tabela inteira (2026-10-22:
+# ~16 mil linhas por tabela, "o filtro de data nao funciona" = tela travada
+# durante essa releitura). O botao Atualizar continua limpando o cache na hora.
+@st.cache_data(ttl=300)
 def carregar_tabela(nome: str) -> pd.DataFrame:
     """O Supabase tem um teto de 1000 linhas por resposta (db-max-rows) -
     ignora qualquer `limit` maior pedido na query. Passar so `limit=20000`
     sem paginar (bug real, achado em 2026-09-19: a tabela ja tinha milhares
     de pedidos por causa dos backfills, e o dashboard so via as 1000
     ULTIMAS gravadas - cortava praticamente todo o historico mais antigo).
-    Pagina de verdade via Range ate a pagina vir incompleta."""
+    Pagina de verdade via Range; a 1a pagina ja traz o total (count=exact) e
+    as demais vao em paralelo - sequencial levava ~8s por tabela."""
     url = _config("SUPABASE_URL").rstrip("/")
     key = _config("SUPABASE_ANON_KEY")
     headers = {"apikey": key, "Authorization": f"Bearer {key}"}
 
-    linhas: list[dict] = []
-    inicio = 0
-    while True:
-        resp = requests.get(
-            f"{url}/rest/v1/{nome}",
-            headers={**headers, "Range": f"{inicio}-{inicio + _PAGINA_SUPABASE - 1}"},
-            params={"select": "*", "order": "processado_em.desc"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        pagina = resp.json()
-        linhas.extend(pagina)
-        if len(pagina) < _PAGINA_SUPABASE:
-            break
-        inicio += _PAGINA_SUPABASE
+    linhas, total = _buscar_pagina(url, headers, nome, 0, contar=True)
+    if len(linhas) == _PAGINA_SUPABASE:
+        if total:
+            inicios = range(_PAGINA_SUPABASE, total, _PAGINA_SUPABASE)
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for pagina, _ in pool.map(lambda i: _buscar_pagina(url, headers, nome, i), inicios):
+                    linhas.extend(pagina)
+        else:  # servidor nao devolveu o total: volta pro modo sequencial
+            inicio = _PAGINA_SUPABASE
+            while True:
+                pagina, _ = _buscar_pagina(url, headers, nome, inicio)
+                linhas.extend(pagina)
+                if len(pagina) < _PAGINA_SUPABASE:
+                    break
+                inicio += _PAGINA_SUPABASE
 
-    return pd.DataFrame(linhas)
+    df = pd.DataFrame(linhas)
+    # Linhas gravadas pelo monitor DURANTE a carga deslocam a ordenacao entre
+    # paginas e podem repetir uma linha - o id e unico, entao e seguro deduplicar.
+    if "id" in df.columns:
+        df = df.drop_duplicates("id")
+    return df
 
 
 @st.cache_data(ttl=300)
@@ -952,7 +978,7 @@ with col_status:
                 hora_brt = (linha["quando"] - pd.Timedelta(hours=3)).strftime("%d/%m %H:%M")
                 st.caption(f"{linha['conta_tiny']}: {hora_brt} (horário de Brasília)")
 with col_botao:
-    if st.button("🔄 Atualizar", help="Limpa o cache do dashboard e relê o Supabase agora (o cache normal dura 2min)."):
+    if st.button("🔄 Atualizar", help="Limpa o cache do dashboard e relê o Supabase agora (o cache normal dura 5min)."):
         st.cache_data.clear()
         st.rerun()
 
