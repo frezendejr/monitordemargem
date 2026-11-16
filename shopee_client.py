@@ -361,6 +361,36 @@ class ShopeeClient:
                 )
         return resultado
 
+    def obter_anuncios_por_status(self, item_status: str = "UNLIST") -> list[dict]:
+        """Todos os anuncios da loja num status - "UNLIST" e o "deslistado"
+        (pausado) do Seller Center. /api/v2/product/get_item_list pagina por
+        offset (page_size max 100) e so devolve item_id/status; o detalhe
+        (nome, SKU, preco, estoque) vem de get_item_base_info, max 50 ids
+        por chamada."""
+        ids: list[int] = []
+        offset = 0
+        while True:
+            resp = self._get(
+                "/api/v2/product/get_item_list",
+                {"offset": offset, "page_size": 100, "item_status": item_status},
+            )
+            corpo = resp.get("response") or {}
+            ids.extend(int(i["item_id"]) for i in (corpo.get("item") or []))
+            if not corpo.get("has_next_page"):
+                break
+            offset = corpo.get("next_offset") or offset + 100
+
+        ids = list(dict.fromkeys(ids))
+        anuncios: list[dict] = []
+        for i in range(0, len(ids), 50):
+            lote = ids[i : i + 50]
+            resp = self._get(
+                "/api/v2/product/get_item_base_info",
+                {"item_id_list": ",".join(str(x) for x in lote)},
+            )
+            anuncios.extend((resp.get("response") or {}).get("item_list") or [])
+        return anuncios
+
     def obter_detalhe_financeiro_pedido(self, order_sn: str) -> DetalheFinanceiroPedidoShopee:
         """Calibrado em 27/09/2026 contra pedido real da Shopee 1 (COMPLETED,
         260913UCJ09P0K) - ver get_escrow_detail.response.order_income:
