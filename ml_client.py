@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,10 @@ class DetalheFinanceiroPedido:
 BASE_URL = "https://api.mercadolibre.com"
 MP_BASE_URL = "https://api.mercadopago.com"
 AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
+
+# Chamadas simultaneas de /items/{id} em obter_anuncios_por_status - poucas,
+# pra nao estourar o limite de requisicoes do app (429).
+_THREADS_DETALHE_ITEM = 5
 
 
 class MLApiError(RuntimeError):
@@ -407,8 +412,16 @@ class MLClient:
 
         /users/{seller_id}/items/search?status=... com search_type=scan (o
         modo por offset trava em 1000 resultados; o scan pagina por
-        scroll_id sem teto) + multiget /items?ids= (maximo 20 ids por
-        chamada) pra trazer titulo/preco/estoque/sub_status de cada um."""
+        scroll_id sem teto) + /items/{id} de cada anuncio pra trazer
+        titulo/preco/estoque/sub_status.
+
+        O multiget /items?ids= NAO serve mais: o ML responde 403
+        "ResourceDeprecated - client no longer allowed to consume this
+        resource" pros apps destas contas (confirmado real em 16/11/2026,
+        nas 4 contas Meli). Por isso 1 chamada por anuncio, em paralelo com
+        poucas threads e retry em 429/5xx (ver _obter_item_com_retry).
+        Falha pontual num anuncio so tira ele da lista (com aviso no log);
+        se metade ou mais falhar, a conta inteira falha."""
         access_token = self._access_token_valido()
         headers = {"Authorization": f"Bearer {access_token}"}
         resp = requests.get(f"{BASE_URL}/users/me", headers=headers, timeout=15)
@@ -435,22 +448,47 @@ class MLClient:
                 break
 
         ids = list(dict.fromkeys(ids))
-        anuncios: list[dict] = []
-        atributos = "id,title,price,available_quantity,status,sub_status,permalink,last_updated,seller_custom_field,attributes,thumbnail"
-        for i in range(0, len(ids), 20):
-            lote = ids[i : i + 20]
-            resp = requests.get(
-                f"{BASE_URL}/items",
-                headers=headers,
-                params={"ids": ",".join(lote), "attributes": atributos},
-                timeout=30,
-            )
-            if not resp.ok:
-                raise MLApiError(f"Falha no multiget de anuncios de '{self.conta}': {resp.status_code} {resp.text}")
-            for r in resp.json():
-                if r.get("code") == 200 and r.get("body"):
-                    anuncios.append(r["body"])
-        return anuncios
+
+        def detalhe(item_id: str) -> dict | MLApiError | None:
+            try:
+                return self._obter_item_com_retry(item_id, headers)
+            except MLApiError as erro:
+                return erro
+
+        with ThreadPoolExecutor(max_workers=_THREADS_DETALHE_ITEM) as pool:
+            detalhes = list(pool.map(detalhe, ids))
+        erros = [d for d in detalhes if isinstance(d, MLApiError)]
+        if erros and len(erros) * 2 >= len(ids):
+            # Metade ou mais falhou: e problema de token/permissao/limite da
+            # conta, nao de um anuncio especifico - sobe o erro pro job manter
+            # o snapshot anterior em vez de gravar uma lista quase vazia.
+            raise erros[0]
+        for erro in erros:
+            logger.warning("[%s] Anuncio ignorado na lista de pausados: %s", self.conta, erro)
+        return [d for d in detalhes if isinstance(d, dict)]
+
+    def _obter_item_com_retry(self, item_id: str, headers: dict, tentativas: int = 4) -> dict | None:
+        """GET /items/{id} com retry (espera 1s, 2s, 4s) em 429, 5xx e erro
+        de rede. Anuncio que sumiu entre a busca e o detalhe (404) volta
+        None. Outro erro da API sobe como MLApiError (erro de rede depois
+        das tentativas sobe como requests.RequestException)."""
+        resp = None
+        for tentativa in range(tentativas):
+            if tentativa:
+                time.sleep(2 ** (tentativa - 1))
+            try:
+                resp = requests.get(f"{BASE_URL}/items/{item_id}", headers=headers, timeout=30)
+            except requests.RequestException:
+                if tentativa == tentativas - 1:
+                    raise
+                continue
+            if resp.ok:
+                return resp.json()
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 429 and resp.status_code < 500:
+                break
+        raise MLApiError(f"Falha ao obter anuncio {item_id} de '{self.conta}': {resp.status_code} {resp.text}")
 
     def obter_categoria(self, category_id: str) -> dict:
         """Detalhe da categoria (nome + path_from_root, a hierarquia
