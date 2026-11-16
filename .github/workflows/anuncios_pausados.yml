@@ -1,0 +1,65 @@
+name: Anuncios pausados (snapshot agendado)
+
+# Alimenta a aba "Anuncios pausados" do dashboard: roda anuncios_pausados_job.py,
+# que grava o snapshot em margin_monitor_anuncios_pausados no Supabase.
+#
+# MARGIN_MONITOR_CLOUD=1 faz o ml_client/shopee_client lerem e salvarem os
+# tokens no Supabase (margin_monitor_ml_tokens / margin_monitor_shopee_tokens),
+# o mesmo lugar que a VM usa - entao este job e a VM compartilham os tokens.
+#
+# Shopee: so entra quando os secrets SHOPEE_PARTNER_ID_SHOPEE_1/2 e
+# SHOPEE_PARTNER_KEY_SHOPEE_1/2 forem cadastrados no repositorio. Sem eles, a
+# parte da Shopee falha logo no inicio (sem chamar a API nem mexer em token) e
+# o snapshot anterior das lojas Shopee fica como estava.
+
+on:
+  schedule:
+    # A cada 2 horas, no minuto 23 (horario UTC do GitHub; evita o pico do :00).
+    - cron: "23 */2 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: anuncios-pausados
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # O job so precisa disso (nao instala streamlit/pandas do dashboard).
+      - run: pip install requests python-dotenv
+
+      - name: Atualizar anuncios pausados (ML + Shopee)
+        env:
+          MARGIN_MONITOR_CLOUD: "1"
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          ML_APP_ID_MELI_CONTA_1: ${{ secrets.ML_APP_ID_MELI_CONTA_1 }}
+          ML_CLIENT_SECRET_MELI_CONTA_1: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_1 }}
+          ML_APP_ID_MELI_CONTA_2: ${{ secrets.ML_APP_ID_MELI_CONTA_2 }}
+          ML_CLIENT_SECRET_MELI_CONTA_2: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_2 }}
+          ML_APP_ID_MELI_CONTA_3: ${{ secrets.ML_APP_ID_MELI_CONTA_3 }}
+          ML_CLIENT_SECRET_MELI_CONTA_3: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_3 }}
+          ML_APP_ID_MELI_CONTA_4: ${{ secrets.ML_APP_ID_MELI_CONTA_4 }}
+          ML_CLIENT_SECRET_MELI_CONTA_4: ${{ secrets.ML_CLIENT_SECRET_MELI_CONTA_4 }}
+
+          SHOPEE_PARTNER_ID_SHOPEE_1: ${{ secrets.SHOPEE_PARTNER_ID_SHOPEE_1 }}
+          SHOPEE_PARTNER_KEY_SHOPEE_1: ${{ secrets.SHOPEE_PARTNER_KEY_SHOPEE_1 }}
+          SHOPEE_PARTNER_ID_SHOPEE_2: ${{ secrets.SHOPEE_PARTNER_ID_SHOPEE_2 }}
+          SHOPEE_PARTNER_KEY_SHOPEE_2: ${{ secrets.SHOPEE_PARTNER_KEY_SHOPEE_2 }}
+        run: |
+          # Secret que nao existe chega como texto vazio: remove a variavel pra
+          # a loja Shopee falhar logo no inicio, sem chamar a API.
+          for v in SHOPEE_PARTNER_ID_SHOPEE_1 SHOPEE_PARTNER_KEY_SHOPEE_1 SHOPEE_PARTNER_ID_SHOPEE_2 SHOPEE_PARTNER_KEY_SHOPEE_2; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          python anuncios_pausados_job.py
