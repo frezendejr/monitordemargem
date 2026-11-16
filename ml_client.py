@@ -402,6 +402,56 @@ class MLClient:
                 break
         return campanhas
 
+    def obter_anuncios_por_status(self, status: str = "paused") -> list[dict]:
+        """Todos os anuncios da conta num status (padrao: "paused").
+
+        /users/{seller_id}/items/search?status=... com search_type=scan (o
+        modo por offset trava em 1000 resultados; o scan pagina por
+        scroll_id sem teto) + multiget /items?ids= (maximo 20 ids por
+        chamada) pra trazer titulo/preco/estoque/sub_status de cada um."""
+        access_token = self._access_token_valido()
+        headers = {"Authorization": f"Bearer {access_token}"}
+        resp = requests.get(f"{BASE_URL}/users/me", headers=headers, timeout=15)
+        if not resp.ok:
+            raise MLApiError(f"Falha ao obter seller_id de '{self.conta}': {resp.status_code} {resp.text}")
+        seller_id = resp.json()["id"]
+
+        ids: list[str] = []
+        scroll_id: str | None = None
+        while True:
+            params = {"status": status, "search_type": "scan", "limit": 100}
+            if scroll_id:
+                params["scroll_id"] = scroll_id
+            resp = requests.get(f"{BASE_URL}/users/{seller_id}/items/search", headers=headers, params=params, timeout=30)
+            if not resp.ok:
+                raise MLApiError(f"Falha ao listar anuncios '{status}' de '{self.conta}': {resp.status_code} {resp.text}")
+            corpo = resp.json()
+            resultados = corpo.get("results") or []
+            if not resultados:
+                break
+            ids.extend(resultados)
+            scroll_id = corpo.get("scroll_id")
+            if not scroll_id:
+                break
+
+        ids = list(dict.fromkeys(ids))
+        anuncios: list[dict] = []
+        atributos = "id,title,price,available_quantity,status,sub_status,permalink,last_updated,seller_custom_field,attributes,thumbnail"
+        for i in range(0, len(ids), 20):
+            lote = ids[i : i + 20]
+            resp = requests.get(
+                f"{BASE_URL}/items",
+                headers=headers,
+                params={"ids": ",".join(lote), "attributes": atributos},
+                timeout=30,
+            )
+            if not resp.ok:
+                raise MLApiError(f"Falha no multiget de anuncios de '{self.conta}': {resp.status_code} {resp.text}")
+            for r in resp.json():
+                if r.get("code") == 200 and r.get("body"):
+                    anuncios.append(r["body"])
+        return anuncios
+
     def obter_categoria(self, category_id: str) -> dict:
         """Detalhe da categoria (nome + path_from_root, a hierarquia
         completa) - endpoint publico do Meli, nao precisa de token."""

@@ -134,6 +134,109 @@ def carregar_ads_campanhas() -> pd.DataFrame:
     return pd.DataFrame(resp.json())
 
 
+@st.cache_data(ttl=300)
+def carregar_anuncios_pausados() -> pd.DataFrame:
+    """Snapshot dos anuncios pausados/deslistados (ver anuncios_pausados_job.py)."""
+    url = _config("SUPABASE_URL").rstrip("/")
+    key = _config("SUPABASE_ANON_KEY")
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    linhas: list[dict] = []
+    inicio = 0
+    while True:
+        resp = requests.get(
+            f"{url}/rest/v1/margin_monitor_anuncios_pausados",
+            headers={**headers, "Range": f"{inicio}-{inicio + _PAGINA_SUPABASE - 1}"},
+            params={"select": "*", "order": "id.asc"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        pagina = resp.json()
+        linhas.extend(pagina)
+        if len(pagina) < _PAGINA_SUPABASE:
+            break
+        inicio += _PAGINA_SUPABASE
+    return pd.DataFrame(linhas)
+
+
+_NOMES_MARKETPLACE_PAUSADOS = {"mercado_livre": "Mercado Livre", "shopee": "Shopee", "amazon": "Amazon", "tiktok": "TikTok Shop"}
+
+
+def _renderizar_aba_pausados(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.info(
+            "Nenhum anúncio pausado registrado ainda - o job (anuncios_pausados_job.py) ainda não rodou "
+            "ou a tabela não foi criada (ver supabase_schema_anuncios_pausados.sql)."
+        )
+        return
+
+    df = df.copy()
+    df["preco"] = pd.to_numeric(df["preco"], errors="coerce")
+    df["estoque"] = pd.to_numeric(df["estoque"], errors="coerce")
+    df["Marketplace"] = df["marketplace"].map(_NOMES_MARKETPLACE_PAUSADOS).fillna(df["marketplace"])
+    df["pausado_desde_dt"] = (pd.to_datetime(df["pausado_desde"], utc=True, errors="coerce") - pd.Timedelta(hours=3)).dt.tz_localize(None)
+    atualizado = pd.to_datetime(df["atualizado_em"], utc=True, errors="coerce").max()
+    if pd.notna(atualizado):
+        st.caption(f"Snapshot de {(atualizado - pd.Timedelta(hours=3)).strftime('%d/%m %H:%M')} (horário de Brasília). Amazon e TikTok Shop não entram: o monitor não integra o catálogo desses canais.")
+
+    resumo = df.groupby("Marketplace").size()
+    colunas_kpi = st.columns(len(resumo) + 1)
+    colunas_kpi[0].metric("Total pausados", int(len(df)))
+    for col, (mkt, qtd) in zip(colunas_kpi[1:], resumo.items()):
+        col.metric(mkt, int(qtd))
+
+    por_conta = (
+        df.groupby(["Marketplace", "conta"]).size().reset_index(name="Pausados").sort_values("Pausados", ascending=False)
+    )
+    por_conta["Conta"] = por_conta["conta"].map(_nome_conta)
+
+    f1, f2, f3 = st.columns([1, 1, 2])
+    mkts = sorted(df["Marketplace"].unique())
+    mkt_sel = f1.selectbox("Marketplace", ["Todos"] + mkts, key="pausados_mkt")
+    base = df if mkt_sel == "Todos" else df[df["Marketplace"] == mkt_sel]
+    contas = sorted(base["conta"].unique())
+    conta_sel = f2.selectbox("Conta", ["Todas"] + contas, format_func=lambda c: c if c == "Todas" else _nome_conta(c), key="pausados_conta")
+    if conta_sel != "Todas":
+        base = base[base["conta"] == conta_sel]
+    motivos = sorted(base["motivo"].dropna().unique())
+    motivos_sel = f3.multiselect("Motivo", motivos, key="pausados_motivo")
+    if motivos_sel:
+        base = base[base["motivo"].isin(motivos_sel)]
+    busca = st.text_input("Buscar por título, SKU ou código do anúncio", key="pausados_busca").strip().lower()
+    if busca:
+        texto = (base["titulo"].fillna("") + " " + base["sku"].fillna("") + " " + base["anuncio_id"].fillna("")).str.lower()
+        base = base[texto.str.contains(busca, regex=False)]
+
+    col_tabela, col_resumo = st.columns([4, 1])
+    with col_resumo:
+        st.markdown("**Por conta**")
+        st.dataframe(por_conta[["Marketplace", "Conta", "Pausados"]], hide_index=True, use_container_width=True)
+    with col_tabela:
+        base = base.sort_values(["Marketplace", "conta", "pausado_desde_dt"], ascending=[True, True, False])
+        st.dataframe(
+            base[["Marketplace", "conta", "anuncio_id", "titulo", "sku", "preco", "estoque", "motivo", "pausado_desde_dt", "link"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "conta": "Conta",
+                "anuncio_id": "Anúncio",
+                "titulo": "Título",
+                "sku": "SKU",
+                "preco": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
+                "estoque": st.column_config.NumberColumn("Estoque", format="%d"),
+                "motivo": "Motivo",
+                "pausado_desde_dt": st.column_config.DatetimeColumn("Última alteração", format="DD/MM/YYYY HH:mm"),
+                "link": st.column_config.LinkColumn("Link", display_text="abrir"),
+            },
+        )
+        st.caption(f"{len(base)} anúncio(s) na lista. \"Última alteração\" é a data em que o anúncio foi mexido pela última vez no marketplace (aproxima quando foi pausado).")
+        st.download_button(
+            "⬇️ Baixar lista (CSV)",
+            base.drop(columns=["pausado_desde_dt"]).to_csv(index=False).encode("utf-8-sig"),
+            file_name="anuncios_pausados.csv",
+            mime="text/csv",
+        )
+
+
 META_TACOS_ADS = 10.0
 META_ROAS_ADS = 5.0
 
@@ -1084,9 +1187,9 @@ if pedidos_f.empty:
 # Abas
 # ----------------------------------------------------------------------
 
-aba_visao, aba_metas, aba_produtos, aba_custos, aba_vendas, aba_ads_ml, aba_ads_shopee = st.tabs(
+aba_visao, aba_metas, aba_produtos, aba_custos, aba_vendas, aba_ads_ml, aba_ads_shopee, aba_pausados = st.tabs(
     ["📈 Visão geral", "📅 Metas diárias", "📦 Produtos", "⚠️ Custos pendentes", "🧾 Vendas",
-     "📢 Ads Mercado Livre", "📢 Ads Shopee"]
+     "📢 Ads Mercado Livre", "📢 Ads Shopee", "⏸️ Anúncios pausados"]
 )
 
 canais_todos = sorted(pedidos["canal"].dropna().unique())
@@ -1948,3 +2051,12 @@ with aba_ads_shopee:
         st.info("Sem dados ainda - o job diário (ads_monitor_job.py) ainda não rodou.")
     else:
         _renderizar_aba_ads(ads_campanhas, "shopee")
+
+with aba_pausados:
+    st.subheader("⏸️ Anúncios pausados por marketplace")
+    try:
+        anuncios_pausados = carregar_anuncios_pausados()
+    except Exception as e:
+        st.warning(f"Não foi possível ler os anúncios pausados: {e}")
+        anuncios_pausados = pd.DataFrame()
+    _renderizar_aba_pausados(anuncios_pausados)

@@ -422,3 +422,16 @@ a excecao subir e derrubar o `monitor.py --once` inteiro no meio de uma
 rodada - importante porque `ativo: true` no `config.yaml` sem credencial
 configurada (caso comum durante a calibracao) acontecia bem no primeiro
 pedido com margem negativa.
+
+## Aba "Anúncios pausados"
+
+Lista os anúncios pausados de cada marketplace/conta (Mercado Livre:
+status `paused`, com o motivo vindo do `sub_status` - ex.: "Sem estoque";
+Shopee: `UNLIST`/deslistado). Amazon e TikTok Shop ficam de fora porque o
+projeto não integra o catálogo desses canais.
+
+1. Rodar [`supabase_schema_anuncios_pausados.sql`](supabase_schema_anuncios_pausados.sql) no SQL Editor do Supabase (uma vez).
+2. Agendar `python anuncios_pausados_job.py` na VM (sugestão: 1x por hora,
+   systemd timer igual ao do monitor). Cada rodada substitui o snapshot de
+   cada conta - anúncio reativado some da lista. Usa os mesmos tokens
+   ML/Shopee e `SUPABASE_SERVICE_ROLE_KEY` dos outros jobs.
