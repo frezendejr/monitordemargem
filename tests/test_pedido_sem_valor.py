@@ -161,6 +161,32 @@ def test_ciclo_calcula_minibike_amazon_com_o_valor():
     assert detalhe is None
 
 
+def test_receita_exata_do_ml_paga_imposto_e_ads_sobre_o_valor_de_venda():
+    from ml_client import DetalheFinanceiroPedido
+
+    class _MLFake:
+        def obter_detalhe_financeiro_pedido(self, numero_ecommerce):
+            return DetalheFinanceiroPedido(
+                receita_liquida=0.49, valor_venda=22.23, comissao_real=4.00, frete_real=17.74, anuncios={}
+            )
+
+    canal_ml = {"imposto_pct": 7.5, "ads_pct": 8.0, "comissao_pct": 14.0, "frete_pct": 15.0, "receita_exata_via_ml": True}
+    pedido = {"total_pedido": "22.23", "numero_ecommerce": "2000019675997270", "data_pedido": "20/11/2026"}
+    itens = [ItemPedido(sku="lixeirapreto-1076", quantidade=1, valor_unitario=22.23, custo_unitario=11.19)]
+
+    resultado, valor_venda, detalhe = monitor_cloud._calcular_pedido_tiny(
+        "900001", pedido, "meli_conta_1", canal_ml, itens, {"meli_conta_1": _MLFake()}
+    )
+
+    assert valor_venda == 22.23
+    assert resultado.receita == 0.49  # repasse real do Mercado Pago
+    assert resultado.imposto == 1.67  # 7,5% da venda, nao do repasse
+    assert resultado.ads == 1.78  # 8% da venda
+    assert (resultado.comissao, resultado.frete) == (4.00, 17.74)  # so informativos
+    assert resultado.margem_contribuicao == pytest.approx(0.49 - 11.19 - 1.67 - 1.78, abs=0.01)
+    assert sum(i.margem_contribuicao for i in resultado.itens) == pytest.approx(resultado.margem_contribuicao, abs=0.01)
+
+
 # --------------------------------------------------------------------------
 # monitor_cloud.recalcular_pedidos_sem_valor (pedidos ja gravados com receita 0)
 # --------------------------------------------------------------------------
