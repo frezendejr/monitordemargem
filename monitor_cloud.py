@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import requests
 import yaml
 from dotenv import load_dotenv
 
@@ -34,7 +35,7 @@ from margin_engine import calcular_margem
 from ml_client import MLApiError, MLClient
 from ml_pedidos import processar_conta_ml
 from shopee_pedidos import processar_loja_shopee
-from tiny_client import TinyApiError, TinyClient
+from tiny_client import TinyApiError, TinyClient, pedido_sem_valor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +45,10 @@ logging.basicConfig(
 logger = logging.getLogger("monitor_cloud")
 
 CONFIG_PATH_PADRAO = "config.yaml"
+
+# Quanto tempo pra tras recalcular_pedidos_sem_valor procura pedidos gravados
+# com receita 0 (gravados antes de existir a trava pedido_sem_valor).
+JANELA_RECALCULO_SEM_VALOR = timedelta(days=7)
 
 
 def carregar_config(caminho: str = CONFIG_PATH_PADRAO) -> dict:
@@ -77,6 +82,75 @@ def _resolver_receita_e_config(pedido_completo, canal, canal_config, ml_clientes
     # 2000018537926936 em 2026-09-19, R$26,32 de frete cobrado em dobro).
     canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0, faixas_frete=None)
     return detalhe.receita_liquida, canal_config_exato, detalhe
+
+
+def _calcular_pedido_tiny(id_tiny, pedido_completo, canal, canal_config, itens, ml_clientes):
+    """Margem de UM pedido vindo do Tiny - usado pelo ciclo normal
+    (processar_conta) e pelo recalculo de pedido que estava sem valor
+    (recalcular_pedidos_sem_valor), pra os dois darem exatamente a mesma conta.
+    Devolve (resultado, valor_venda, detalhe_ml)."""
+    receita, canal_config_efetivo, detalhe_ml = _resolver_receita_e_config(
+        pedido_completo, canal, canal_config, ml_clientes
+    )
+
+    resultado = calcular_margem(
+        numero_pedido=id_tiny,
+        canal=canal,
+        itens=itens,
+        receita=receita,
+        canal_config=canal_config_efetivo,
+        data_pedido=pedido_completo.get("data_pedido", ""),
+    )
+
+    # comissao/frete "reais" so pra exibicao detalhada no dashboard - nao
+    # mudam margem_contribuicao (ja calculada acima com receita liquida
+    # e comissao/frete zerados, ver _resolver_receita_e_config).
+    if detalhe_ml is not None:
+        valor_venda = detalhe_ml.valor_venda
+        resultado.comissao = detalhe_ml.comissao_real
+        resultado.frete = detalhe_ml.frete_real
+
+        # Mercado Ads e cobrado a parte (fatura mensal), nao aparece em
+        # nenhuma API do pedido - regra do time: 8% sobre o VALOR DE
+        # VENDA bruto, nao sobre a receita liquida. calcular_margem
+        # aplicou ads_pct em cima da receita liquida (a unica que ele
+        # recebe) - corrige aqui pra usar a base certa e propaga a
+        # diferenca pra margem_contribuicao/margem_pct, que ISSO SIM muda
+        # de verdade (ads nao esta embutido na receita liquida do ML,
+        # diferente de comissao/frete).
+        ads_pct = canal_config_efetivo.get("ads_pct", 0.0)
+        ads_correto = round(valor_venda * ads_pct / 100, 2)
+        resultado.margem_contribuicao = round(resultado.margem_contribuicao - (ads_correto - resultado.ads), 2)
+        resultado.margem_pct = round(resultado.margem_contribuicao / resultado.receita * 100, 2) if resultado.receita else 0.0
+        resultado.ads = ads_correto
+    else:
+        valor_venda = resultado.receita
+
+    return resultado, valor_venda, detalhe_ml
+
+
+def _alertar_se_negativo(conta_tiny, id_tiny, resultado, config) -> bool:
+    threshold = config.get("alertas", {}).get("margem_negativa_threshold", 0)
+    deve_alertar = resultado.margem_contribuicao < threshold
+
+    if deve_alertar:
+        mensagem = montar_mensagem_alerta(resultado)
+        enviar_whatsapp(mensagem, config)
+        enviar_email(f"Margem negativa - pedido {id_tiny} ({conta_tiny})", mensagem, config)
+        logger.warning("[%s] ALERTA margem negativa: pedido %s (%s)", conta_tiny, id_tiny, resultado.canal)
+
+    return deve_alertar
+
+
+def _gravar_no_supabase(conta_tiny, pedido_completo, resultado, deve_alertar, valor_venda, detalhe_ml) -> None:
+    """Upsert (on_conflict) - num pedido ja gravado, sobrescreve os valores."""
+    supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar, valor_venda=valor_venda)
+    supabase_writer.enviar_itens(
+        conta_tiny,
+        resultado,
+        anuncios=detalhe_ml.anuncios if detalhe_ml else None,
+        numero_ecommerce=pedido_completo.get("numero_ecommerce"),
+    )
 
 
 def processar_conta(conta_tiny: str, cliente: TinyClient, canais_config: dict, config: dict, custos: dict) -> int:
@@ -130,60 +204,25 @@ def processar_conta(conta_tiny: str, cliente: TinyClient, canais_config: dict, c
             continue
 
         itens = cliente.montar_itens(pedido_completo, custos)
-        receita, canal_config_efetivo, detalhe_ml = _resolver_receita_e_config(
-            pedido_completo, canal, canais_config[canal], ml_clientes
+        if pedido_sem_valor(pedido_completo, itens):
+            # Ex.: Amazon "Pending" - o Tiny importou antes de a Amazon liberar o
+            # preco. Nao grava nem alerta: volta na busca quando o Tiny atualizar
+            # o pedido com o valor (ver tiny_client.pedido_sem_valor).
+            logger.info(
+                "[%s] Pedido %s (%s) ainda sem valor no Tiny - aguardando o marketplace liberar o preco",
+                conta_tiny,
+                id_tiny,
+                canal,
+            )
+            continue
+
+        resultado, valor_venda, detalhe_ml = _calcular_pedido_tiny(
+            id_tiny, pedido_completo, canal, canais_config[canal], itens, ml_clientes
         )
-
-        resultado = calcular_margem(
-            numero_pedido=id_tiny,
-            canal=canal,
-            itens=itens,
-            receita=receita,
-            canal_config=canal_config_efetivo,
-            data_pedido=pedido_completo.get("data_pedido", ""),
-        )
-
-        # comissao/frete "reais" so pra exibicao detalhada no dashboard - nao
-        # mudam margem_contribuicao (ja calculada acima com receita liquida
-        # e comissao/frete zerados, ver _resolver_receita_e_config).
-        if detalhe_ml is not None:
-            valor_venda = detalhe_ml.valor_venda
-            resultado.comissao = detalhe_ml.comissao_real
-            resultado.frete = detalhe_ml.frete_real
-
-            # Mercado Ads e cobrado a parte (fatura mensal), nao aparece em
-            # nenhuma API do pedido - regra do time: 8% sobre o VALOR DE
-            # VENDA bruto, nao sobre a receita liquida. calcular_margem
-            # aplicou ads_pct em cima da receita liquida (a unica que ele
-            # recebe) - corrige aqui pra usar a base certa e propaga a
-            # diferenca pra margem_contribuicao/margem_pct, que ISSO SIM muda
-            # de verdade (ads nao esta embutido na receita liquida do ML,
-            # diferente de comissao/frete).
-            ads_pct = canal_config_efetivo.get("ads_pct", 0.0)
-            ads_correto = round(valor_venda * ads_pct / 100, 2)
-            resultado.margem_contribuicao = round(resultado.margem_contribuicao - (ads_correto - resultado.ads), 2)
-            resultado.margem_pct = round(resultado.margem_contribuicao / resultado.receita * 100, 2) if resultado.receita else 0.0
-            resultado.ads = ads_correto
-        else:
-            valor_venda = resultado.receita
-
-        threshold = config.get("alertas", {}).get("margem_negativa_threshold", 0)
-        deve_alertar = resultado.margem_contribuicao < threshold
-
-        if deve_alertar:
-            mensagem = montar_mensagem_alerta(resultado)
-            enviar_whatsapp(mensagem, config)
-            enviar_email(f"Margem negativa - pedido {id_tiny} ({conta_tiny})", mensagem, config)
-            logger.warning("[%s] ALERTA margem negativa: pedido %s (%s)", conta_tiny, id_tiny, resultado.canal)
+        deve_alertar = _alertar_se_negativo(conta_tiny, id_tiny, resultado, config)
 
         try:
-            supabase_writer.enviar_pedido(conta_tiny, resultado, alertado=deve_alertar, valor_venda=valor_venda)
-            supabase_writer.enviar_itens(
-                conta_tiny,
-                resultado,
-                anuncios=detalhe_ml.anuncios if detalhe_ml else None,
-                numero_ecommerce=pedido_completo.get("numero_ecommerce"),
-            )
+            _gravar_no_supabase(conta_tiny, pedido_completo, resultado, deve_alertar, valor_venda, detalhe_ml)
         except supabase_writer.SupabaseError:
             # Diferente do monitor.py local: aqui o Supabase E o dedupe (nao
             # tem SQLite de apoio), entao uma falha aqui significa que esse
@@ -203,6 +242,102 @@ def processar_conta(conta_tiny: str, cliente: TinyClient, canais_config: dict, c
     return processados
 
 
+def _pedidos_gravados_sem_valor(desde: datetime) -> list[dict]:
+    url = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    resp = requests.get(
+        f"{url}/rest/v1/margin_monitor_pedidos",
+        params={
+            "select": "conta_tiny,numero_pedido,canal",
+            "receita": "eq.0",
+            "processado_em": f"gte.{desde.isoformat()}",
+        },
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def recalcular_pedidos_sem_valor(config: dict, custos: dict, clientes: dict | None = None) -> int:
+    """Corrige pedidos do Tiny que foram gravados com receita 0 ANTES da trava
+    pedido_sem_valor existir (ex.: Amazon 926773159, minibike vendida a
+    R$ 123,99 e gravada com margem -R$ 58,27 em 20/11/2026). O dedupe pelo
+    Supabase (storage.ja_processado) fazia esse pedido nunca mais ser
+    recalculado, mesmo depois de o Tiny receber o valor.
+
+    A cada ciclo: busca no Supabase os pedidos com receita 0 gravados nos
+    ultimos JANELA_RECALCULO_SEM_VALOR, so dos canais que vem do Tiny (ML e
+    Shopee vem da API do proprio marketplace, com outro numero de pedido),
+    rele cada um no Tiny e, se o valor ja chegou, recalcula com a MESMA conta
+    do ciclo normal e sobrescreve (upsert) pedido + itens. Pedido que continua
+    sem valor ou foi cancelado fica como esta.
+
+    Retorna quantos pedidos foram corrigidos. Nunca derruba o ciclo."""
+    try:
+        gravados = _pedidos_gravados_sem_valor(datetime.now(timezone.utc) - JANELA_RECALCULO_SEM_VALOR)
+    except (KeyError, requests.RequestException):
+        logger.exception("Falha ao buscar pedidos gravados sem valor - tenta de novo no proximo ciclo")
+        return 0
+
+    clientes = clientes if clientes is not None else {}
+    ml_clientes: dict[str, MLClient] = {}
+    corrigidos = 0
+
+    for linha in gravados:
+        conta_tiny = linha["conta_tiny"]
+        id_tiny = str(linha["numero_pedido"])
+        canal = linha["canal"]
+
+        conta_cfg = config.get("tiny_contas", {}).get(conta_tiny) or {}
+        canal_cfg = (conta_cfg.get("canais") or {}).get(canal)
+        if not canal_cfg or canal_cfg.get("fonte_pedido") in ("shopee", "ml"):
+            continue
+
+        try:
+            if conta_tiny not in clientes:
+                token = os.environ.get(conta_cfg.get("token_env", ""))
+                if not token:
+                    continue
+                clientes[conta_tiny] = TinyClient(token)
+            cliente = clientes[conta_tiny]
+            pedido_completo = cliente.obter_pedido_completo(id_tiny)
+        except (TinyApiError, requests.RequestException, ValueError):
+            logger.exception("[%s] Falha ao reler no Tiny o pedido sem valor %s", conta_tiny, id_tiny)
+            continue
+
+        if pedido_completo.get("situacao") == "Cancelado":
+            logger.info("[%s] Pedido %s (gravado sem valor) foi cancelado no Tiny - nao recalcula", conta_tiny, id_tiny)
+            continue
+
+        itens = cliente.montar_itens(pedido_completo, custos)
+        if pedido_sem_valor(pedido_completo, itens):
+            continue
+
+        resultado, valor_venda, detalhe_ml = _calcular_pedido_tiny(
+            id_tiny, pedido_completo, canal, canal_cfg, itens, ml_clientes
+        )
+        deve_alertar = _alertar_se_negativo(conta_tiny, id_tiny, resultado, config)
+
+        try:
+            _gravar_no_supabase(conta_tiny, pedido_completo, resultado, deve_alertar, valor_venda, detalhe_ml)
+        except supabase_writer.SupabaseError:
+            logger.exception("[%s] Falha ao regravar o pedido %s - tenta de novo no proximo ciclo", conta_tiny, id_tiny)
+            continue
+
+        logger.info(
+            "[%s] Pedido %s (%s) estava sem valor - recalculado: receita %.2f, margem %.2f",
+            conta_tiny,
+            id_tiny,
+            canal,
+            resultado.receita,
+            resultado.margem_contribuicao,
+        )
+        corrigidos += 1
+
+    return corrigidos
+
+
 def main():
     load_dotenv()
     if os.environ.get("MARGIN_MONITOR_CLOUD") != "1":
@@ -215,6 +350,13 @@ def main():
     n_corrigidos = recalcular_custo_pendente()
     if n_corrigidos:
         logger.info("Custo pendente preenchido no dashboard: %d item(ns) recalculado(s)", n_corrigidos)
+
+    try:
+        n_sem_valor = recalcular_pedidos_sem_valor(config, custos)
+        if n_sem_valor:
+            logger.info("Pedido(s) gravado(s) sem valor e recalculado(s) com o valor do Tiny: %d", n_sem_valor)
+    except Exception:
+        logger.exception("Erro inesperado ao recalcular pedidos sem valor - segue o ciclo")
 
     total = 0
     for conta_tiny, conta_cfg in config["tiny_contas"].items():

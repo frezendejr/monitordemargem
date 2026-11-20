@@ -414,6 +414,20 @@ em relacao ao que o codigo assumia originalmente:
   buscar exemplos reais de pedido de cada uma via `--debug-busca` +
   `--debug-pedido` em lote.
 
+- **Pedido gravado sem valor (Amazon "Pending")**: o Tiny as vezes importa o
+  pedido da Amazon antes de a Amazon liberar o preco (pedido pendente de
+  pagamento vem sem valor) - `total_pedido` e `valor_unitario` chegam
+  zerados. O monitor calculava margem com receita 0 (so CMV + tarifa DBA
+  minima), alertava prejuizo falso e, pelo dedupe no Supabase, nunca mais
+  recalculava. Caso real: pedido 926773159 (minibike vendida a R$ 123,99)
+  gravado em 20/11/2026 com margem -R$ 58,27. Corrigido em 2 partes:
+  `tiny_client.pedido_sem_valor` faz o ciclo pular (sem gravar nem alertar)
+  pedido com total e itens zerados - ele volta na busca por
+  `dataAtualizacao` quando o Tiny atualiza o valor; e
+  `monitor_cloud.recalcular_pedidos_sem_valor` rele no Tiny, a cada ciclo,
+  os pedidos ja gravados com receita 0 nos ultimos 7 dias e regrava com a
+  conta certa assim que o valor aparece.
+
 ### Alertas: nao dependem de rede/credencial pra nao travar o monitor
 
 `enviar_whatsapp`/`enviar_email` agora tratam `KeyError` de credencial

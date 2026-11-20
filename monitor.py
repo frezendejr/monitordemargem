@@ -29,7 +29,7 @@ from categoria_produto import recalcular_categoria_pendente
 from custo_planilha import carregar_custos, recalcular_custo_pendente, sobrepor_custos_do_dashboard
 from margin_engine import calcular_margem
 from ml_client import DetalheFinanceiroPedido, MLApiError, MLClient
-from tiny_client import TinyClient, TinyApiError
+from tiny_client import TinyClient, TinyApiError, pedido_sem_valor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -167,6 +167,12 @@ def processar_ciclo_conta(
             continue
 
         itens = cliente.montar_itens(pedido_completo, custos)
+        if pedido_sem_valor(pedido_completo, itens):
+            # Ex.: Amazon "Pending" - ver tiny_client.pedido_sem_valor. Nao grava
+            # nem alerta; volta na busca quando o Tiny atualizar com o valor.
+            logger.info("[%s] Pedido %s (%s) ainda sem valor no Tiny - aguardando", conta_tiny, id_tiny, canal)
+            continue
+
         receita, canal_config_efetivo, detalhe_ml = _resolver_receita_e_config(
             pedido_completo, canal, canais_config[canal], ml_clientes
         )
