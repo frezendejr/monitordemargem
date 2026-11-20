@@ -414,6 +414,20 @@ em relacao ao que o codigo assumia originalmente:
   buscar exemplos reais de pedido de cada uma via `--debug-busca` +
   `--debug-pedido` em lote.
 
+- **Pedido gravado sem valor (Amazon "Pending")**: o Tiny as vezes importa o
+  pedido da Amazon antes de a Amazon liberar o preco (pedido pendente de
+  pagamento vem sem valor) - `total_pedido` e `valor_unitario` chegam
+  zerados. O monitor calculava margem com receita 0 (so CMV + tarifa DBA
+  minima), alertava prejuizo falso e, pelo dedupe no Supabase, nunca mais
+  recalculava. Caso real: pedido 926773159 (minibike vendida a R$ 123,99)
+  gravado em 20/11/2026 com margem -R$ 58,27. Corrigido em 2 partes:
+  `tiny_client.pedido_sem_valor` faz o ciclo pular (sem gravar nem alertar)
+  pedido com total e itens zerados - ele volta na busca por
+  `dataAtualizacao` quando o Tiny atualiza o valor; e
+  `monitor_cloud.recalcular_pedidos_sem_valor` rele no Tiny, a cada ciclo,
+  os pedidos ja gravados com receita 0 nos ultimos 7 dias e regrava com a
+  conta certa assim que o valor aparece.
+
 ### Alertas: nao dependem de rede/credencial pra nao travar o monitor
 
 `enviar_whatsapp`/`enviar_email` agora tratam `KeyError` de credencial
@@ -422,6 +436,25 @@ a excecao subir e derrubar o `monitor.py --once` inteiro no meio de uma
 rodada - importante porque `ativo: true` no `config.yaml` sem credencial
 configurada (caso comum durante a calibracao) acontecia bem no primeiro
 pedido com margem negativa.
+
+## Imposto e recálculo de um mês
+
+- **Imposto = % do valor da venda (a nota)**, em todos os canais. Até
+  20/11/2026 o ML e a Shopee pela API calculavam o imposto sobre a receita
+  LÍQUIDA (o repasse), o que dava imposto menor do que o real - ex.: lixeira
+  vendida a R$ 22,23 com repasse de R$ 0,49 pagava R$ 0,02 de imposto. Agora
+  `calcular_margem(..., valor_venda=...)` usa o valor de venda como base do
+  imposto e do Ads (o Ads já era corrigido à parte, só no pedido; agora o
+  rateio por item também fica certo).
+- **Alíquota: 7,5%** (informada pelo financeiro em 20/11/2026; antes 4%). Fica
+  no `imposto_pct` de cada canal do `config.yaml` **da VM** - trocar lá, além
+  do `config.example.yaml`.
+- **Pedidos já gravados** não mudam sozinhos quando muda o imposto ou um
+  custo. Pra isso: `recalcular_margens.py` (ou o workflow manual
+  "Recalcular margens de um mês" na aba Actions), que recalcula um mês
+  inteiro com a alíquota nova e, nos SKUs informados, o CMV com o custo
+  cadastrado hoje. Sem `--aplicar` (ou com "aplicar" desmarcado) só mostra o
+  resumo; rodar de novo com os mesmos parâmetros não muda nada.
 
 ## Aba "Anúncios pausados"
 

@@ -3,6 +3,10 @@
 Formula:
     MC = Receita - CMV - Imposto - Comissao/tarifa do canal - Frete - Ads
 
+Imposto e Ads sao % do VALOR DE VENDA bruto (parametro valor_venda de
+calcular_margem) - nos canais em que a receita ja vem liquida (ML/Shopee pela
+API), a base continua sendo a venda, nao o repasse.
+
 Imposto, Comissao, Frete e Ads sao SEMPRE percentuais estimados de
 canal_config sobre a receita - nunca os valores exatos cobrados no pedido.
 Isso e proposital: o Tiny nao expoe o valor exato de tarifa/frete cobrado
@@ -116,6 +120,7 @@ def calcular_margem(
     receita: float,
     canal_config: dict,
     data_pedido: str = "",
+    valor_venda: float | None = None,
 ) -> ResultadoMargem:
     """Calcula a margem de contribuicao de um pedido.
 
@@ -123,7 +128,16 @@ def calcular_margem(
     valor final do pedido, liquido de qualquer desconto que o Tiny capture.
     O frete que o CANAL cobra do vendedor vem de canal_config (frete_pct
     fixo ou faixas_frete por valor do pedido), nao do valor_frete do pedido.
+
+    `valor_venda` (bruto) e a base do IMPOSTO e do ADS: o imposto incide sobre
+    o valor da nota (a venda), nao sobre o que o marketplace repassa, e o Ads
+    e % do valor de venda (regra do time). Nos canais em que `receita` ja vem
+    liquida de tarifa/frete (Mercado Livre e Shopee pela API), passar aqui o
+    valor de venda bruto - senao imposto e Ads saem calculados sobre a
+    receita liquida, menores do que sao. Sem `valor_venda`, a base e a propria
+    `receita` (caso do Tiny, em que receita ja e o valor bruto do pedido).
     """
+    base_venda = receita if valor_venda is None else valor_venda
     skus_sem_custo = [item.sku for item in itens if not item.custo_unitario]
     custo_ausente = len(skus_sem_custo) > 0
 
@@ -137,10 +151,10 @@ def calcular_margem(
     comissao_pct = canal_config.get("comissao_pct", 0.0)
     frete_pct = _percentual_frete(receita, canal_config)
 
-    imposto = receita * imposto_pct / 100
+    imposto = base_venda * imposto_pct / 100
     comissao = receita * comissao_pct / 100
     frete = receita * frete_pct / 100 + _frete_dba(itens, canal_config)
-    ads = receita * ads_pct / 100
+    ads = base_venda * ads_pct / 100
 
     margem_contribuicao = receita - cmv - imposto - comissao - frete - ads
     margem_pct = (margem_contribuicao / receita * 100) if receita else 0.0

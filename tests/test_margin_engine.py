@@ -147,6 +147,28 @@ def test_dba_por_preco_peso_e_quantidade():
     assert r.frete == pytest.approx(2 * 4.50 + 18.75 + 23.45)
 
 
+def test_imposto_e_ads_sobre_o_valor_de_venda_quando_a_receita_ja_e_liquida():
+    # Lixeira no ML (pedido real 2000019675997270): venda R$ 22,23, repasse do ML R$ 0,49.
+    # Imposto e sobre a nota (22,23), nao sobre o repasse.
+    itens = [ItemPedido(sku="lixeirapreto-1076", quantidade=1, valor_unitario=22.23, custo_unitario=11.19)]
+    config = {"imposto_pct": 7.5, "ads_pct": 8.0, "comissao_pct": 0.0, "frete_pct": 0.0}
+    r = calcular_margem("2000019675997270", "meli_conta_1", itens, receita=0.49, canal_config=config, valor_venda=22.23)
+
+    assert r.receita == 0.49
+    assert r.imposto == 1.67  # 7,5% de 22,23
+    assert r.ads == 1.78  # 8% de 22,23
+    assert r.margem_contribuicao == pytest.approx(0.49 - 11.19 - 1.67 - 1.78, abs=0.01)
+    # o rateio por item continua batendo com o pedido inteiro
+    assert sum(i.margem_contribuicao for i in r.itens) == pytest.approx(r.margem_contribuicao, abs=0.01)
+
+
+def test_sem_valor_de_venda_a_base_do_imposto_e_a_receita():
+    itens = [ItemPedido(sku="x", quantidade=1, valor_unitario=100.0, custo_unitario=10.0)]
+    r = calcular_margem("1", "amazon", itens, receita=100.0, canal_config={"imposto_pct": 7.5, "ads_pct": 2.0})
+    assert r.imposto == 7.5
+    assert r.ads == 2.0
+
+
 def test_sem_config_dba_nao_cobra_logistica():
     itens = [ItemPedido(sku="x", quantidade=1, valor_unitario=100, custo_unitario=10)]
     assert calcular_margem("3", "amazon", itens, receita=100, canal_config={}).frete == 0

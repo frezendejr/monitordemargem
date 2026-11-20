@@ -76,6 +76,26 @@ class TinyApiError(RuntimeError):
     """Erro retornado pela API do Tiny (retorno.status != 'OK')."""
 
 
+def pedido_sem_valor(pedido_completo: dict, itens: list[ItemPedido]) -> bool:
+    """True quando o pedido chegou no Tiny SEM valor nenhum: total_pedido zerado
+    e todos os itens com valor_unitario zerado.
+
+    Acontece quando o Tiny importa o pedido antes de o marketplace liberar o
+    preco - a Amazon so informa o valor de um pedido "Pending" depois que o
+    pagamento e confirmado. Calcular margem disso da "receita 0 - CMV - frete",
+    um prejuizo que nao existe. Caso real: pedido 926773159 (minibike na Amazon,
+    vendida a R$ 123,99) foi gravado em 20/11/2026 com receita 0 e margem
+    -R$ 58,27 (CMV 53,77 + tarifa DBA minima de R$ 4,50 calculada sobre preco 0).
+
+    Nao e venda ainda: o monitor nao grava nem alerta. O pedido volta na busca
+    por dataAtualizacao quando o Tiny o atualiza com o valor (o pedido precisa
+    do valor pra ser faturado/enviado, entao essa atualizacao sempre acontece).
+    """
+    total = float(pedido_completo.get("total_pedido", 0) or 0)
+    valor_itens = sum(item.quantidade * item.valor_unitario for item in itens)
+    return total <= 0 and valor_itens <= 0
+
+
 class TinyClient:
     def __init__(self, token: str):
         """`token` e sempre explicito: o Grupo Amo tem uma conta Tiny por

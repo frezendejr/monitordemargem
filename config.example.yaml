@@ -34,6 +34,10 @@ alertas:
 # Para Mercado Livre esse valor ja vem com a subconta embutida
 # (ex.: "ML_AMOSHOESEIRELI 2"), entao nao precisa de nenhum criterio extra
 # pra distinguir Meli 2 de Meli 3 dentro da mesma conta Tiny.
+#
+# imposto_pct: aliquota sobre o VALOR DA VENDA (a nota), em todos os canais -
+# 7,5% informado pelo financeiro em 20/11/2026 (antes estava 4%). Se algum
+# CNPJ tiver aliquota diferente, ajustar so nos canais dele.
 tiny_contas:
   conta_amoshoesgyn:
     nome: "Amo Shoes Goiania (amoshoesgyn)"
@@ -42,7 +46,7 @@ tiny_contas:
       meli_conta_1:
         nome: "Mercado Livre - Conta 1"
         tiny_identificador: "ML_AMOOUTLET 1" # confirmado via --debug-pedido 910186770
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 0.0
         comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
         # "regra dos R$ 79": so usada no fallback tambem.
@@ -62,7 +66,7 @@ tiny_contas:
       meli_conta_2:
         nome: "Mercado Livre - Conta 2"
         tiny_identificador: "ML_AMOSHOESEIRELI 2" # confirmado via --debug-pedido 900318268
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 0.0
         comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
         frete_pct: 15.0 # so usado se receita_exata_via_ml falhar (fallback)
@@ -77,7 +81,7 @@ tiny_contas:
         # "Mercado Livre 3" - NAO segue o padrao "ML_<LOJA> 3" (era so um
         # palpite errado); confirmado via --debug-pedido 900047353.
         tiny_identificador: "Mercado Livre 3"
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 0.0
         comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
         frete_pct: 15.0 # so usado se receita_exata_via_ml falhar (fallback)
@@ -88,7 +92,7 @@ tiny_contas:
       shopee_1:
         nome: "Shopee - Conta 1"
         tiny_identificador: "Shopee" # confirmado via --debug-pedido 900319199
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 15.0
         comissao_pct: 14.0
         frete_pct: 0.0
@@ -96,7 +100,7 @@ tiny_contas:
       tiktok_shop:
         nome: "TikTok Shop"
         tiny_identificador: "TikTok Shop" # confirmado via --debug-pedido 900318459
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 0.0 # PREENCHER: % de ads no TikTok Shop, se houver
         comissao_pct: 0.0 # PREENCHER: comissao real do TikTok Shop
         frete_pct: 0.0 # PREENCHER: frete real do TikTok Shop
@@ -110,7 +114,7 @@ tiny_contas:
         # "Mercado Livre 4" (mesmo padrao da conta 3) - confirmado via
         # --debug-pedido 926128169.
         tiny_identificador: "Mercado Livre 4"
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 0.0
         comissao_pct: 14.0 # so usado se receita_exata_via_ml falhar (fallback)
         frete_pct: 15.0 # so usado se receita_exata_via_ml falhar (fallback)
@@ -123,7 +127,7 @@ tiny_contas:
       amazon:
         nome: "Amazon"
         tiny_identificador: "Amazon" # confirmado via --debug-pedido 926065656
-        imposto_pct: 4.0 # PREENCHER: imposto real da Amazon
+        imposto_pct: 7.5
         ads_pct: 0.0 # PREENCHER: % de ads na Amazon, se houver
         comissao_pct: 0.0 # PREENCHER: comissao real da Amazon
         frete_pct: 0.0 # PREENCHER: frete real da Amazon
@@ -135,7 +139,7 @@ tiny_contas:
       shopee_2:
         nome: "Shopee - Conta 2"
         tiny_identificador: "Shopee" # confirmado via --debug-pedido 1099720542
-        imposto_pct: 4.0
+        imposto_pct: 7.5
         ads_pct: 15.6
         comissao_pct: 14.0
         frete_pct: 0.0
