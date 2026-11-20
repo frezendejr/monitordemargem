@@ -81,7 +81,7 @@ def _montar_itens(detalhe_pedido: dict, custos: dict) -> list[ItemPedido]:
 
 def processar_loja_shopee(loja: str, conta_tiny: str, canal_config: dict, config: dict, custos: dict) -> int:
     cliente = ShopeeClient(loja, ambiente="prod")
-    ads_pct = canal_config.get("ads_pct", 0.0)  # fixo (decisao do time, 27/09/2026) - ver "Monitor de Ads" pro TACOS real
+    # ads_pct do canal_config e fixo (decisao do time, 27/09/2026) - ver "Monitor de Ads" pro TACOS real
 
     checkpoint = storage.obter_checkpoint(loja)
     agora = datetime.now(timezone.utc)
@@ -148,8 +148,8 @@ def processar_loja_shopee(loja: str, conta_tiny: str, canal_config: dict, config
         # Mesma tecnica do Mercado Livre (ver monitor_cloud.py): comissao/frete
         # exatos vem por fora, calcular_margem roda com essas duas zeradas pra
         # nao duplicar. Ads da Shopee e cobrado por fora do escrow (so um
-        # "top up" residual aparece la) - continua estimado por % (ads_pct)
-        # sobre o VALOR DE VENDA bruto, igual ML.
+        # "top up" residual aparece la) - continua estimado por % (ads_pct).
+        # Imposto (sobre a nota) e Ads sao % do VALOR DE VENDA bruto, igual ML.
         canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0)
         resultado = calcular_margem(
             numero_pedido=order_sn,
@@ -158,14 +158,10 @@ def processar_loja_shopee(loja: str, conta_tiny: str, canal_config: dict, config
             receita=financeiro.receita_liquida,
             canal_config=canal_config_exato,
             data_pedido=data_pedido,
+            valor_venda=financeiro.valor_venda,
         )
         resultado.comissao = financeiro.comissao_real
         resultado.frete = financeiro.frete_real
-
-        ads_correto = round(financeiro.valor_venda * ads_pct / 100, 2)
-        resultado.margem_contribuicao = round(resultado.margem_contribuicao - (ads_correto - resultado.ads), 2)
-        resultado.margem_pct = round(resultado.margem_contribuicao / resultado.receita * 100, 2) if resultado.receita else 0.0
-        resultado.ads = ads_correto
 
         threshold = config.get("alertas", {}).get("margem_negativa_threshold", 0)
         deve_alertar = resultado.margem_contribuicao < threshold

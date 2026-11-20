@@ -177,6 +177,9 @@ def processar_ciclo_conta(
             pedido_completo, canal, canais_config[canal], ml_clientes
         )
 
+        # Imposto (sobre a nota) e Mercado Ads (regra do time: % sobre o VALOR
+        # DE VENDA) incidem sobre o valor de venda bruto - com receita exata do
+        # ML a receita ja vem liquida, entao a base vai a parte (valor_venda).
         resultado = calcular_margem(
             numero_pedido=id_tiny,
             canal=canal,
@@ -184,6 +187,7 @@ def processar_ciclo_conta(
             receita=receita,
             canal_config=canal_config_efetivo,
             data_pedido=pedido_completo.get("data_pedido", ""),
+            valor_venda=detalhe_ml.valor_venda if detalhe_ml is not None else None,
         )
 
         # comissao/frete "reais" so pra exibicao detalhada no dashboard - nao
@@ -193,20 +197,6 @@ def processar_ciclo_conta(
             valor_venda = detalhe_ml.valor_venda
             resultado.comissao = detalhe_ml.comissao_real
             resultado.frete = detalhe_ml.frete_real
-
-            # Mercado Ads e cobrado a parte (fatura mensal), nao aparece em
-            # nenhuma API do pedido - regra do time: 8% sobre o VALOR DE
-            # VENDA bruto, nao sobre a receita liquida. calcular_margem
-            # aplicou ads_pct em cima da receita liquida (a unica que ele
-            # recebe) - corrige aqui pra usar a base certa e propaga a
-            # diferenca pra margem_contribuicao/margem_pct, que ISSO SIM muda
-            # de verdade (ads nao esta embutido na receita liquida do ML,
-            # diferente de comissao/frete).
-            ads_pct = canal_config_efetivo.get("ads_pct", 0.0)
-            ads_correto = round(valor_venda * ads_pct / 100, 2)
-            resultado.margem_contribuicao = round(resultado.margem_contribuicao - (ads_correto - resultado.ads), 2)
-            resultado.margem_pct = round(resultado.margem_contribuicao / resultado.receita * 100, 2) if resultado.receita else 0.0
-            resultado.ads = ads_correto
         else:
             valor_venda = resultado.receita
 

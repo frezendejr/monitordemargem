@@ -91,7 +91,6 @@ def processar_conta_ml(canal: str, conta_tiny: str, canal_config: dict, config: 
 
     logger.info("[%s] %d pedido(s) pago(s) atualizado(s) desde %s", canal, len(pedidos), desde.isoformat())
 
-    ads_pct = canal_config.get("ads_pct", 0.0)
     processados = 0
     houve_falha = False
 
@@ -122,8 +121,8 @@ def processar_conta_ml(canal: str, conta_tiny: str, canal_config: dict, config: 
 
         # Mesma tecnica do caminho Tiny+ML (monitor_cloud.py): receita = liquido real
         # (net_received_amount), comissao/frete exatos entram so como informacao
-        # (ja estao descontados da receita) e o Ads (cobrado por fora) e % sobre o
-        # valor de venda bruto.
+        # (ja estao descontados da receita). Imposto (sobre a nota) e Ads (cobrado
+        # por fora) sao % do valor de venda bruto - valor_venda.
         canal_config_exato = dict(canal_config, comissao_pct=0.0, frete_pct=0.0, faixas_frete=None)
         resultado = calcular_margem(
             numero_pedido=order_id,
@@ -132,16 +131,10 @@ def processar_conta_ml(canal: str, conta_tiny: str, canal_config: dict, config: 
             receita=detalhe.receita_liquida,
             canal_config=canal_config_exato,
             data_pedido=data_pedido,
+            valor_venda=detalhe.valor_venda,
         )
         resultado.comissao = detalhe.comissao_real
         resultado.frete = detalhe.frete_real
-
-        ads_correto = round(detalhe.valor_venda * ads_pct / 100, 2)
-        resultado.margem_contribuicao = round(resultado.margem_contribuicao - (ads_correto - resultado.ads), 2)
-        resultado.margem_pct = (
-            round(resultado.margem_contribuicao / resultado.receita * 100, 2) if resultado.receita else 0.0
-        )
-        resultado.ads = ads_correto
 
         threshold = config.get("alertas", {}).get("margem_negativa_threshold", 0)
         deve_alertar = resultado.margem_contribuicao < threshold

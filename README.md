@@ -437,6 +437,25 @@ rodada - importante porque `ativo: true` no `config.yaml` sem credencial
 configurada (caso comum durante a calibracao) acontecia bem no primeiro
 pedido com margem negativa.
 
+## Imposto e recálculo de um mês
+
+- **Imposto = % do valor da venda (a nota)**, em todos os canais. Até
+  20/11/2026 o ML e a Shopee pela API calculavam o imposto sobre a receita
+  LÍQUIDA (o repasse), o que dava imposto menor do que o real - ex.: lixeira
+  vendida a R$ 22,23 com repasse de R$ 0,49 pagava R$ 0,02 de imposto. Agora
+  `calcular_margem(..., valor_venda=...)` usa o valor de venda como base do
+  imposto e do Ads (o Ads já era corrigido à parte, só no pedido; agora o
+  rateio por item também fica certo).
+- **Alíquota: 7,5%** (informada pelo financeiro em 20/11/2026; antes 4%). Fica
+  no `imposto_pct` de cada canal do `config.yaml` **da VM** - trocar lá, além
+  do `config.example.yaml`.
+- **Pedidos já gravados** não mudam sozinhos quando muda o imposto ou um
+  custo. Pra isso: `recalcular_margens.py` (ou o workflow manual
+  "Recalcular margens de um mês" na aba Actions), que recalcula um mês
+  inteiro com a alíquota nova e, nos SKUs informados, o CMV com o custo
+  cadastrado hoje. Sem `--aplicar` (ou com "aplicar" desmarcado) só mostra o
+  resumo; rodar de novo com os mesmos parâmetros não muda nada.
+
 ## Aba "Anúncios pausados"
 
 Lista os anúncios pausados de cada marketplace/conta (Mercado Livre:
