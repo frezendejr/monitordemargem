@@ -1,0 +1,64 @@
+name: Recalcular margens de um mes (imposto/custo)
+
+# Disparo MANUAL (aba Actions -> "Recalcular margens de um mes" -> Run workflow).
+# Recalcula os pedidos JA GRAVADOS de um mes no Supabase com a aliquota de
+# imposto informada (sobre o valor da venda) e, nos SKUs listados, o CMV com o
+# custo cadastrado hoje - ver recalcular_margens.py.
+#
+# Rode primeiro com "aplicar" desmarcado: o log mostra o resumo (imposto, CMV e
+# margem antes -> depois, por canal) sem gravar nada. Pode rodar de novo quantas
+# vezes quiser - com os mesmos parametros, a segunda rodada nao muda nada.
+#
+# Importante: os pedidos NOVOS so entram com a aliquota nova depois que o
+# imposto_pct do config.yaml da VM for trocado. Se rodar isto antes, rode de
+# novo depois da troca pra pegar os pedidos que entraram no meio tempo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mes:
+        description: "Mes dos pedidos (MM/AAAA)"
+        required: true
+        default: "11/2026"
+      imposto:
+        description: "Imposto (%) sobre o valor da venda"
+        required: true
+        default: "7.5"
+      skus:
+        description: "SKUs com custo corrigido (separados por virgula) - vazio = so imposto"
+        required: false
+        default: "lixeirapreto-1076,lixeirapreto-1076-c1,lixeirapreto-1076-c2,lixeirapreto-1076-c3,lixeirapreto-1076-c5,lixeirapreto--1076,kit2lixeirapreto-1076,kit3lixeirapreto-1076,kitlixeiraeportacaneta,kitlixeira+portacaneta,kitlixeira+portacaneta-8,kit2lixeira+2portacaneta"
+      aplicar:
+        description: "Gravar no Supabase (desmarcado = so simula e mostra o resumo)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: recalcular-margens
+  cancel-in-progress: false
+
+jobs:
+  recalcular:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests python-dotenv
+
+      - name: Recalcular
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MES: ${{ inputs.mes }}
+          IMPOSTO: ${{ inputs.imposto }}
+          SKUS: ${{ inputs.skus }}
+          APLICAR: ${{ inputs.aplicar }}
+        run: |
+          ARGS=(--mes "$MES" --imposto "$IMPOSTO" --skus "$SKUS")
+          if [ "$APLICAR" = "true" ]; then ARGS+=(--aplicar); fi
+          python recalcular_margens.py "${ARGS[@]}"
