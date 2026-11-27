@@ -109,6 +109,29 @@ streamlit run dashboard.py
    time - o repo pode continuar privado, o Streamlit Cloud so precisa de
    acesso de leitura a ele (via OAuth do GitHub).
 
+### 6. Meta de cada dia seguindo a planilha "Metas Site"
+
+O total do mes por canal continua cadastrado no dashboard (Visao geral >
+"Meta do mes"), mas a divisao desse total pelos dias segue a aba do mes da
+planilha Metas Site ("Novembro 2026" etc.), que ja tem Black Friday, 11.11,
+Cyber Monday e feriados. Sem a planilha, a divisao cai na sazonalidade por
+dia da semana de cada canal (comportamento antigo).
+
+1. A planilha precisa estar compartilhada por link (leitor basta).
+2. Nos Secrets do app, colar o ID da planilha (o trecho entre `/d/` e
+   `/edit` no link):
+   ```toml
+   METAS_PLANILHA_ID = "..."
+   ```
+   O ID nunca vai pro repositorio: quem tem o link abre a planilha.
+3. A aba "Metas diarias" mostra de onde veio a meta de cada dia e avisa
+   quando o total do mes de algum canal na planilha e diferente do
+   cadastrado no dashboard (ai os dias nao batem ate acertar um dos dois).
+
+Canais da planilha que o monitor nao acompanha (Shein, NetShoes, Dafiti,
+Loja Integrada) sao ignorados. O de-para de nomes ("Shoppe 1" ->
+`shopee_1` etc.) fica em `metas_planilha.py` (`CANAL_PLANILHA`).
+
 ## Custo dos produtos (planilha de apoio)
 
 O Tiny (mesmo depois de corrigido o bug de parametro `id`/`codigo` - ver
@@ -249,6 +272,9 @@ precisa de PC ligado, nem de tarefa agendada do Windows.
   (colar no SQL Editor do Supabase, ver secao "Dashboard").
 - `dashboard.py` - dashboard Streamlit (margem por marketplace/conta/
   produto/venda), le do Supabase. Ver secao "Dashboard".
+- `metas_planilha.py` - le a meta de cada dia da planilha Metas Site (aba
+  do mes) pra repartir a meta do mes pelos dias no dashboard. Ver
+  "Meta de cada dia seguindo a planilha".
 - `alerts.py` - WhatsApp (CallMeBot, Z-API ou Meta Cloud API), e-mail (SMTP)
   e atualizacao da planilha de historico (`dashboard_margem.xlsx` - nao
   confundir com a planilha de custo).

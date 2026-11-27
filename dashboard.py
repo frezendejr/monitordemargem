@@ -25,6 +25,7 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
+from metas_planilha import PlanilhaIndisponivel, baixar_metas_mes, nome_aba, pesos_por_dia, total_por_canal
 from minibike_controle import FUSO_BRASILIA, calcular_controle
 
 load_dotenv()
@@ -722,7 +723,9 @@ def _kpi_card(titulo: str, valor: str, status: str = "neutral", sub: str | None 
 # Metas (faturamento/margem POR MES E POR CANAL - a mistura entre canais e
 # uma decisao estrategica do time, ex.: "crescer Amazon, manter Shoppe 1",
 # nao algo que da pra calcular olhando historico. A divisao por DIA dentro
-# do mes/canal ja e automatica, via sazonalidade propria de cada canal.
+# do mes/canal segue a planilha "Metas Site" do time quando a aba do mes
+# existe (ela tem Black Friday, 11.11, feriados...); sem ela, cai na
+# sazonalidade por dia da semana de cada canal. Ver metas_planilha.py.
 # Hiper Meta e um segundo nivel, mais agressivo, que a planilha de
 # referencia do time ja usa.)
 # ----------------------------------------------------------------------
@@ -772,6 +775,22 @@ def salvar_metas_canal(mes: date, registros: list[dict]) -> None:
         timeout=15,
     )
     resp.raise_for_status()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def carregar_metas_planilha(mes: date) -> tuple[dict, str | None]:
+    """({canal: {dia: meta}}, motivo) da aba do mes na planilha Metas Site.
+    Dicionario vazio = divisao por dia cai na sazonalidade; `motivo` diz por
+    que (sem METAS_PLANILHA_ID nos Secrets, aba do mes inexistente, planilha
+    sem compartilhamento por link...)."""
+    try:
+        planilha_id = _config("METAS_PLANILHA_ID")
+    except KeyError:
+        return {}, "METAS_PLANILHA_ID não configurado nos Secrets"
+    try:
+        return baixar_metas_mes(planilha_id, mes), None
+    except PlanilhaIndisponivel as e:
+        return {}, str(e)
 
 
 def calcular_indices_dia_semana(pedidos_hist: pd.DataFrame, janela_dias: int = 90) -> dict[int, float]:
@@ -841,10 +860,15 @@ def _meses_no_intervalo(data_inicio: date, data_fim: date) -> list[date]:
 
 
 def calcular_meta_periodo(
-    data_inicio: date, data_fim: date, metas_por_mes: dict, indices_por_canal: dict
+    data_inicio: date,
+    data_fim: date,
+    metas_por_mes: dict,
+    indices_por_canal: dict,
+    metas_planilha_por_mes: dict | None = None,
 ) -> tuple[float, float, bool]:
     """Soma a meta de TODOS os canais, cada um repartido pelos dias do
-    periodo pedido proporcional ao indice de sazonalidade proprio daquele
+    periodo pedido conforme o desenho diario da planilha Metas Site (quando
+    ela tem o canal naquele mes) ou o indice de sazonalidade proprio daquele
     canal. Retorna (meta_faturamento, meta_margem_r$, tem_mes_sem_meta)."""
     total_fat = 0.0
     total_margem = 0.0
@@ -855,15 +879,12 @@ def calcular_meta_periodo(
             faltando = True
             continue
         dias_mes = _dias_do_mes(mes)
+        planilha_mes = (metas_planilha_por_mes or {}).get(mes) or {}
         for canal, meta_canal in metas_canais.items():
-            indices_canal = indices_por_canal.get(canal) or {i: 1.0 for i in range(7)}
-            soma_pesos_mes = sum(indices_canal[d.weekday()] for d in dias_mes)
-            if not soma_pesos_mes:
-                continue
+            pesos = pesos_por_dia(dias_mes, indices_por_canal.get(canal), planilha_mes.get(canal))
             for d in dias_mes:
                 if data_inicio <= d <= data_fim:
-                    peso_dia = indices_canal[d.weekday()] / soma_pesos_mes
-                    meta_dia_fat = (meta_canal.get("meta_faturamento") or 0.0) * peso_dia
+                    meta_dia_fat = (meta_canal.get("meta_faturamento") or 0.0) * pesos[d]
                     total_fat += meta_dia_fat
                     total_margem += meta_dia_fat * (meta_canal.get("meta_margem_pct") or 0.0) / 100
     return round(total_fat, 2), round(total_margem, 2), faltando
@@ -935,12 +956,23 @@ _DIAS_SEMANA_PT = [
 
 
 def montar_relatorio_diario(
-    pedidos_hist: pd.DataFrame, mes: date, metas_canais: dict, indices_por_canal: dict, canais_ordem: list[str]
+    pedidos_hist: pd.DataFrame,
+    mes: date,
+    metas_canais: dict,
+    indices_por_canal: dict,
+    canais_ordem: list[str],
+    metas_planilha_mes: dict | None = None,
 ) -> pd.DataFrame:
     """Reconstroi a planilha de metas diaria (1 linha por dia+canal, mais
     uma linha de total do dia) 100% a partir do Supabase - substitui o
-    preenchimento manual de Realizado/Pedidos/Tkmedio/Gap/Acumulados."""
+    preenchimento manual de Realizado/Pedidos/Tkmedio/Gap/Acumulados. A meta
+    do mes de cada canal e repartida pelos dias com o desenho da planilha
+    Metas Site (`metas_planilha_mes`, quando tem o canal) ou a sazonalidade."""
     dias_mes = _dias_do_mes(mes)
+    pesos_canal = {
+        canal: pesos_por_dia(dias_mes, indices_por_canal.get(canal), (metas_planilha_mes or {}).get(canal))
+        for canal in canais_ordem
+    }
     hoje = _hoje_brasilia()
     pedidos_mes = pedidos_hist[
         (pedidos_hist["data_pedido_dt"].dt.date >= dias_mes[0]) & (pedidos_hist["data_pedido_dt"].dt.date <= dias_mes[-1])
@@ -963,9 +995,7 @@ def montar_relatorio_diario(
 
         for canal in canais_ordem:
             meta_canal = metas_canais.get(canal, {})
-            indices_canal = indices_por_canal.get(canal) or {i: 1.0 for i in range(7)}
-            soma_pesos_mes = sum(indices_canal[d.weekday()] for d in dias_mes) or 1.0
-            peso_dia = indices_canal[dia.weekday()] / soma_pesos_mes
+            peso_dia = pesos_canal[canal][dia]
 
             meta_dia = (meta_canal.get("meta_faturamento") or 0.0) * peso_dia
             hiper_dia = (meta_canal.get("hiper_meta_faturamento") or 0.0) * peso_dia
@@ -1245,8 +1275,8 @@ with aba_visao:
         st.caption(
             "'Dividir por canal' usa o histórico só como PONTO DE PARTIDA - ajuste linha a linha se quiser "
             "crescer/reduzir algum canal de propósito antes de salvar. A divisão por DIA dentro do mês "
-            "(dentro de cada canal) é sempre automática, proporcional a como aquele canal costuma vender "
-            "por dia da semana."
+            "(dentro de cada canal) segue a planilha Metas Site quando a aba do mês existe (com Black Friday, "
+            "11.11, feriados); sem ela, é proporcional a como aquele canal costuma vender por dia da semana."
         )
         metas_editadas = st.data_editor(
             tabela_metas,
@@ -1271,8 +1301,13 @@ with aba_visao:
                 st.error(f"Falha ao salvar: {e}")
 
     indices_por_canal = calcular_indices_por_canal(pedidos, canais_todos)
+    metas_planilha_periodo = {
+        mes: carregar_metas_planilha(mes)[0]
+        for mes in _meses_no_intervalo(data_inicio, data_fim)
+        if metas_por_mes.get(mes)
+    }
     meta_fat_periodo, meta_margem_periodo, meta_incompleta = calcular_meta_periodo(
-        data_inicio, data_fim, metas_por_mes, indices_por_canal
+        data_inicio, data_fim, metas_por_mes, indices_por_canal, metas_planilha_periodo
     )
     # Faturamento/margem real do periodo SEMPRE de todas as contas/canais
     # (a meta e um numero unico da empresa toda - nao faz sentido comparar
@@ -1741,7 +1776,39 @@ with aba_metas:
             "(fica só com Realizado/Pedidos/Tkmedio), mas Meta/Gap/Projeção ficam zerados."
         )
 
-    relatorio = montar_relatorio_diario(pedidos, mes_relatorio, metas_mes_relatorio, indices_por_canal, canais_todos)
+    metas_planilha_rel, motivo_sem_planilha = (
+        carregar_metas_planilha(mes_relatorio) if metas_mes_relatorio else ({}, None)
+    )
+    if metas_planilha_rel:
+        fora_da_planilha = sorted(c for c in metas_mes_relatorio if c not in metas_planilha_rel)
+        st.caption(
+            f"📄 Meta de cada dia seguindo a planilha Metas Site (aba {nome_aba(mes_relatorio)})."
+            + (
+                f" Fora da planilha, por sazonalidade do dia da semana: {', '.join(fora_da_planilha)}."
+                if fora_da_planilha
+                else ""
+            )
+        )
+        totais_planilha = total_por_canal(metas_planilha_rel)
+        divergentes = [
+            f"{canal} (planilha {_fmt_moeda(totais_planilha[canal])} · monitor "
+            f"{_fmt_moeda(m.get('meta_faturamento') or 0.0)})"
+            for canal, m in sorted(metas_mes_relatorio.items())
+            if canal in totais_planilha and abs(totais_planilha[canal] - (m.get("meta_faturamento") or 0.0)) >= 1
+        ]
+        if divergentes:
+            st.warning(
+                "Meta do mês diferente entre a planilha e o cadastro do monitor: "
+                + "; ".join(divergentes)
+                + ". O monitor usa o desenho dos dias da planilha, mas o total do mês cadastrado aqui "
+                "(aba Visão geral) - acerte um dos dois pra bater dia a dia."
+            )
+    elif metas_mes_relatorio:
+        st.caption(f"Meta de cada dia por sazonalidade do dia da semana ({motivo_sem_planilha}).")
+
+    relatorio = montar_relatorio_diario(
+        pedidos, mes_relatorio, metas_mes_relatorio, indices_por_canal, canais_todos, metas_planilha_rel
+    )
 
     st.dataframe(
         relatorio,
